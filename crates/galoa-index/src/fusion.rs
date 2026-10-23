@@ -313,6 +313,7 @@ pub fn run_specretf_fusion_eval(
             acc_dir.finish("direct_only", false),
             acc_fus.finish("fusion_full", false),
         ],
+        timings: Default::default(),
     })
 }
 

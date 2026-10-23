@@ -184,6 +184,23 @@ pub fn print_report(r: &EvalReport, data: &Path) {
         );
     }
     println!();
+    let t = &r.timings;
+    println!(
+        "timing: feature_build={:.3}s  retrieval={:.3}s  total={:.3}s",
+        t.feature_build_secs, t.retrieval_secs, t.total_secs
+    );
+    if let Some(naive) = t.naive_full_stft_estimate_secs {
+        let speedup = if t.total_secs > 0.0 {
+            naive / t.total_secs
+        } else {
+            0.0
+        };
+        println!(
+            "timing: naive_full_stft_estimate={:.1}s  (~{:.1}× vs cached total; sampled)",
+            naive, speedup
+        );
+    }
+    println!();
     println!(
         "Note: ~5d M1 (~{} bars) is short for strong claims; numbers are diagnostic only.",
         r.n_bars

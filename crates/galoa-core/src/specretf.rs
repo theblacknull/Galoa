@@ -14,7 +14,8 @@
 //!
 //! Defaults (Table 5 / impl details): `M=window_size∈{8,16,32}`, α∈{0.01…0.2}, K~10.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// SpecReTF default STFT frame length `M` (Table 5 `window_size`).
@@ -108,7 +109,31 @@ fn hann(n: usize) -> Vec<f64> {
         .collect()
 }
 
+/// Thread-local FFT plan cache — avoid rebuilding `FftPlanner` per window.
+fn cached_fft_forward(n: usize) -> Arc<dyn Fft<f64>> {
+    thread_local! {
+        static PLANNER: std::cell::RefCell<FftPlanner<f64>> =
+            std::cell::RefCell::new(FftPlanner::<f64>::new());
+        static CACHE: std::cell::RefCell<Option<(usize, Arc<dyn Fft<f64>>)>> =
+            std::cell::RefCell::new(None);
+    }
+    CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some((cached_n, plan)) = slot.as_ref() {
+            if *cached_n == n {
+                return Arc::clone(plan);
+            }
+        }
+        let plan = PLANNER.with(|p| p.borrow_mut().plan_fft_forward(n));
+        *slot = Some((n, Arc::clone(&plan)));
+        plan
+    })
+}
+
 /// Build SpecReTF spectral descriptor via STFT (eq. 1–2).
+///
+/// Reuses a thread-local FFT plan for `params.n_fft` (hot path: library build +
+/// per-query descriptors).
 pub fn spectral_descriptor(
     signal: &[f64],
     params: &SpecReTfParams,
@@ -126,9 +151,7 @@ pub fn spectral_descriptor(
     let n_frames = params.num_frames(signal.len());
     let m = params.n_fft;
     let win = hann(m);
-
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(m);
+    let fft = cached_fft_forward(m);
     let mut buf = vec![Complex::new(0.0, 0.0); m];
     let mut frames = Vec::with_capacity(n_frames);
 
@@ -220,21 +243,22 @@ pub fn spectral_similarity(
         return Err(SpecReTfError::FrameMismatch);
     }
 
-    let mut sims = Vec::with_capacity(n);
-    for i in 0..n {
-        sims.push(frame_similarity(&query.frames[i], &cand.frames[i], params));
-    }
-
     let alpha = params.ema_alpha;
+    // α≤0 → uniform mean (ablation “w/o recency”); avoid per-frame Vec alloc.
     if alpha <= 0.0 || !alpha.is_finite() {
-        return Ok(sims.iter().sum::<f64>() / n as f64);
+        let mut sum = 0.0;
+        for i in 0..n {
+            sum += frame_similarity(&query.frames[i], &cand.frames[i], params);
+        }
+        return Ok(sum / n as f64);
     }
 
     let one_m = (1.0 - alpha).clamp(0.0, 1.0);
     let mut score = 0.0;
     // Paper indexing: w=1..W with w=W newest → weight α (1−α)^{0}
     // Our index f=0..n-1 oldest→newest → exponent W−w = n−1−f
-    for (f, sim) in sims.iter().enumerate() {
+    for f in 0..n {
+        let sim = frame_similarity(&query.frames[f], &cand.frames[f], params);
         let exponent = (n - 1 - f) as i32;
         let w = alpha * one_m.powi(exponent);
         score += w * sim;

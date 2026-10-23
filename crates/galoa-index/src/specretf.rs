@@ -7,6 +7,10 @@ use galoa_core::{
     log_returns, softmax_ensemble_forecast, spectral_descriptor, spectral_similarity, z_normalize,
     SpecReTfError, SpecReTfParams, SpectralDescriptor, WeightedForecast,
 };
+use rayon::prelude::*;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::time::Instant;
 use thiserror::Error;
 
 use crate::{DEFAULT_HORIZON, DEFAULT_WINDOW};
@@ -67,6 +71,9 @@ pub struct SpecReTfEntry {
 }
 
 /// Precomputed SpecReTF library over a close series.
+///
+/// Fast path: every historical window's STFT descriptor is built once at
+/// `build_with_signal` and reused for all queries (no per-query full-history STFT).
 #[derive(Clone, Debug)]
 pub struct SpecReTfIndex {
     pub window: usize,
@@ -75,6 +82,8 @@ pub struct SpecReTfIndex {
     pub signal: SignalMode,
     pub closes: Vec<f64>,
     pub entries: Vec<SpecReTfEntry>,
+    /// `end_idx → entries` index for O(1) query-descriptor reuse (same STFT as library).
+    end_to_entry: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -134,16 +143,21 @@ impl SpecReTfIndex {
 
         let mut entries = Vec::new();
         let last_start = closes.len() - need;
+        // Dense map: end_idx → entry index (None if that end skipped).
+        let mut end_to_entry = vec![None; closes.len() + 1];
         for start in 0..=last_start {
             let w = &closes[start..start + window];
             match descriptor_from_closes(w, &params, signal) {
                 Ok(descriptor) => {
+                    let end_idx = start + window;
+                    let ei = entries.len();
                     entries.push(SpecReTfEntry {
-                        end_idx: start + window,
+                        end_idx,
                         descriptor,
                         future_abs: closes[start + window..start + window + horizon].to_vec(),
                         last_close: closes[start + window - 1],
                     });
+                    end_to_entry[end_idx] = Some(ei);
                 }
                 Err(SpecReTfIndexError::Returns(_) | SpecReTfIndexError::Spec(_)) => continue,
                 Err(e) => return Err(e),
@@ -156,10 +170,14 @@ impl SpecReTfIndex {
             signal,
             closes: closes.to_vec(),
             entries,
+            end_to_entry,
         })
     }
 
     /// Always-FIRE forecast: top-K by SpecReTF similarity, exclude overlapping windows.
+    ///
+    /// Uses cached library descriptors + parallel candidate scoring + bounded top-K heap
+    /// (math identical to serial full sort of similarities).
     pub fn forecast_at(
         &self,
         query_end: usize,
@@ -169,26 +187,54 @@ impl SpecReTfIndex {
             return Err(SpecReTfIndexError::InvalidParams);
         }
         let q_start = query_end - self.window;
-        let query_window = &self.closes[q_start..query_end];
-        let q_desc = descriptor_from_closes(query_window, &self.params, self.signal)?;
+        let q_desc_owned;
+        let q_desc = if let Some(Some(ei)) = self.end_to_entry.get(query_end) {
+            &self.entries[*ei].descriptor
+        } else {
+            let query_window = &self.closes[q_start..query_end];
+            q_desc_owned = descriptor_from_closes(query_window, &self.params, self.signal)?;
+            &q_desc_owned
+        };
         let q_last = self.closes[query_end - 1];
 
-        let mut scored: Vec<(f64, usize)> = Vec::with_capacity(self.entries.len());
-        for (i, entry) in self.entries.iter().enumerate() {
-            if overlaps(entry.end_idx, self.window, self.horizon, query_end, self.window) {
-                continue;
-            }
-            // Causal: only use library windows that finished before the query window.
-            if entry.end_idx > q_start {
-                continue;
-            }
-            let sim = spectral_similarity(&q_desc, &entry.descriptor, &self.params)?;
-            scored.push((sim, i));
-        }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let take = k.min(scored.len());
+        let window = self.window;
+        let horizon = self.horizon;
+        let params = &self.params;
 
-        let neighbors: Vec<SpecNeighbor> = scored[..take]
+        // Parallel score eligible candidates; keep only top-K (min-heap of size K).
+        let top: BinaryHeap<SimIdx> = self
+            .entries
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, entry)| {
+                if entry.end_idx > q_start {
+                    return None;
+                }
+                if overlaps(entry.end_idx, window, horizon, query_end, window) {
+                    return None;
+                }
+                let sim = spectral_similarity(q_desc, &entry.descriptor, params).ok()?;
+                Some(SimIdx { sim, idx: i })
+            })
+            .fold(
+                BinaryHeap::new,
+                |mut heap, item| {
+                    push_top_k(&mut heap, item, k);
+                    heap
+                },
+            )
+            .reduce(BinaryHeap::new, |mut a, b| {
+                for item in b {
+                    push_top_k(&mut a, item, k);
+                }
+                a
+            });
+
+        let mut scored: Vec<(f64, usize)> = top.into_iter().map(|s| (s.sim, s.idx)).collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        let take = scored.len();
+
+        let neighbors: Vec<SpecNeighbor> = scored
             .iter()
             .map(|(sim, idx)| SpecNeighbor {
                 end_idx: self.entries[*idx].end_idx,
@@ -202,7 +248,7 @@ impl SpecReTfIndex {
         } else {
             let mut trajs = Vec::with_capacity(take);
             let mut ss = Vec::with_capacity(take);
-            for (sim, idx) in &scored[..take] {
+            for (sim, idx) in &scored {
                 let entry = &self.entries[*idx];
                 let shift = q_last - entry.last_close;
                 trajs.push(entry.future_abs.iter().map(|p| p + shift).collect());
@@ -218,6 +264,50 @@ impl SpecReTfIndex {
             query_last: q_last,
             query_end,
         })
+    }
+
+}
+
+/// Min-heap entry by similarity (for retaining top-K largest scores).
+#[derive(Clone, Copy, Debug)]
+struct SimIdx {
+    sim: f64,
+    idx: usize,
+}
+
+impl PartialEq for SimIdx {
+    fn eq(&self, other: &Self) -> bool {
+        self.sim == other.sim && self.idx == other.idx
+    }
+}
+impl Eq for SimIdx {}
+impl PartialOrd for SimIdx {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SimIdx {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Min-heap: smaller similarity is "greater" for BinaryHeap pop order.
+        match other.sim.partial_cmp(&self.sim).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => self.idx.cmp(&other.idx),
+            o => o,
+        }
+    }
+}
+
+fn push_top_k(heap: &mut BinaryHeap<SimIdx>, item: SimIdx, k: usize) {
+    if k == 0 {
+        return;
+    }
+    if heap.len() < k {
+        heap.push(item);
+    } else if let Some(worst) = heap.peek() {
+        // heap is min-heap of sims → peek is smallest kept score
+        if item.sim > worst.sim {
+            heap.pop();
+            heap.push(item);
+        }
     }
 }
 
@@ -289,6 +379,19 @@ pub struct MethodMetrics {
     pub band_coverage: Option<f64>,
 }
 
+/// Wall-clock seconds for SpecReTF eval phases (release builds).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct EvalTimings {
+    /// One-shot STFT library build (all historical windows).
+    pub feature_build_secs: f64,
+    /// Walk-forward retrieval + baselines loop.
+    pub retrieval_secs: f64,
+    /// feature_build + retrieval (+ light bookkeeping).
+    pub total_secs: f64,
+    /// Extrapolated seconds if every query re-STFTd all candidates (sampled).
+    pub naive_full_stft_estimate_secs: Option<f64>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvalReport {
     pub n_bars: usize,
@@ -301,6 +404,8 @@ pub struct EvalReport {
     pub ema_alpha: f64,
     pub signal: SignalMode,
     pub methods: Vec<MethodMetrics>,
+    #[serde(default)]
+    pub timings: EvalTimings,
 }
 
 /// One hyperparameter grid cell (SpecReTF vs baselines).
@@ -370,6 +475,9 @@ impl Acc {
 ///
 /// Always forecasts (no abstain). Expanding causal library: neighbours must end
 /// before the query window starts.
+///
+/// Fast path: STFT descriptors for all library windows are built once; queries
+/// reuse the cached descriptor when present. Prints timings via `EvalReport.timings`.
 pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport, SpecReTfIndexError> {
     if cfg.window == 0 || cfg.horizon == 0 || cfg.k == 0 || cfg.stride == 0 {
         return Err(SpecReTfIndexError::InvalidParams);
@@ -383,6 +491,8 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
         });
     }
 
+    let t_total = Instant::now();
+    let t_feat = Instant::now();
     let index = SpecReTfIndex::build_with_signal(
         closes,
         cfg.window,
@@ -398,8 +508,22 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
         let w = &closes[start..e.end_idx];
         z_feats.push(z_normalize(w).ok().map(|(z, _)| z));
     }
+    let feature_build_secs = t_feat.elapsed().as_secs_f64();
 
+    let t_ret = Instant::now();
     let (acc_spec, acc_naive, acc_td) = eval_accums(closes, &index, &z_feats, cfg)?;
+    let retrieval_secs = t_ret.elapsed().as_secs_f64();
+    let total_secs = t_total.elapsed().as_secs_f64();
+
+    let methods = vec![
+        acc_spec.finish("specretf", true),
+        acc_naive.finish("naive_last", false),
+        acc_td.finish("td_znorm_l2_knn", false),
+    ];
+    let n_queries = methods[0].n_queries;
+    // Outside `total_secs` so the report reflects the cached fast path only.
+    let naive_full_stft_estimate_secs =
+        estimate_naive_full_stft_secs(closes, &index, cfg, n_queries);
 
     Ok(EvalReport {
         n_bars: closes.len(),
@@ -411,12 +535,69 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
         hop: cfg.params.hop,
         ema_alpha: cfg.params.ema_alpha,
         signal: cfg.signal,
-        methods: vec![
-            acc_spec.finish("specretf", true),
-            acc_naive.finish("naive_last", false),
-            acc_td.finish("td_znorm_l2_knn", false),
-        ],
+        methods,
+        timings: EvalTimings {
+            feature_build_secs,
+            retrieval_secs,
+            total_secs,
+            naive_full_stft_estimate_secs,
+        },
     })
+}
+
+/// Sample a few mid-series queries, re-STFT every causal candidate each time, and
+/// extrapolate to `n_queries` (contrast vs cached library path).
+fn estimate_naive_full_stft_secs(
+    closes: &[f64],
+    index: &SpecReTfIndex,
+    cfg: &EvalConfig,
+    n_queries: usize,
+) -> Option<f64> {
+    if n_queries == 0 || index.entries.is_empty() {
+        return None;
+    }
+    let first_end = cfg.window + cfg.min_history_windows;
+    let last_end = closes.len().saturating_sub(cfg.horizon);
+    if first_end > last_end {
+        return None;
+    }
+    const SAMPLE: usize = 3;
+    let span = last_end - first_end;
+    let mut sample_ends = Vec::with_capacity(SAMPLE);
+    for s in 0..SAMPLE {
+        let end = first_end + (span * (s + 1)) / (SAMPLE + 1);
+        sample_ends.push(end.min(last_end));
+    }
+
+    let t0 = Instant::now();
+    let mut scored_pairs = 0usize;
+    for &query_end in &sample_ends {
+        let q_start = query_end - cfg.window;
+        let q_win = &closes[q_start..query_end];
+        let Ok(q_desc) = descriptor_from_closes(q_win, &cfg.params, cfg.signal) else {
+            continue;
+        };
+        for entry in &index.entries {
+            if entry.end_idx > q_start {
+                continue;
+            }
+            if overlaps(entry.end_idx, cfg.window, cfg.horizon, query_end, cfg.window) {
+                continue;
+            }
+            let e_start = entry.end_idx - cfg.window;
+            let e_win = &closes[e_start..entry.end_idx];
+            let Ok(c_desc) = descriptor_from_closes(e_win, &cfg.params, cfg.signal) else {
+                continue;
+            };
+            let _ = spectral_similarity(&q_desc, &c_desc, &cfg.params);
+            scored_pairs += 1;
+        }
+    }
+    let sample_secs = t0.elapsed().as_secs_f64();
+    if sample_ends.is_empty() || scored_pairs == 0 {
+        return None;
+    }
+    Some(sample_secs * (n_queries as f64) / (sample_ends.len() as f64))
 }
 
 fn eval_accums(
