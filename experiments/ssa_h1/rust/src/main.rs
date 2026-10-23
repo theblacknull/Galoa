@@ -1,11 +1,18 @@
-//! SSA H=1 Gold experiment — **Rust only** (ssa_rs).
+//! SSA multi-horizon Gold experiment — **Rust only** (ssa_rs).
 //!
-//! Architecture: fit → signal group by cumsum contribution → L/K forecast H=1.
-//! Metrics: dir_acc, pnl_pct, pnl_over_maxdd. No baselines.
+//! Architecture: fit → signal group by cumsum contribution → L/K forecast H steps.
+//! Score = sum of H forecasted log-returns; realized = sum rets[i+1..=i+H].
+//! PnL: hold close[i+1] → close[i+1+H]. Metrics: dir_acc, pnl_pct, pnl_over_maxdd.
 //!
 //! ```text
+//! # default grid: H∈{5,15,30} × 8 (win,L,E,mode), stride=3
 //! cargo run --release --manifest-path experiments/ssa_h1/rust/Cargo.toml -- \
-//!   --data data/xauusd_m1_prior5d_b.bin
+//!   --data data/xauusd_m1_15d.bin --out experiments/ssa_h1/ssa_15d_hmulti.json
+//!
+//! # locked OOS
+//! cargo run --release --manifest-path experiments/ssa_h1/rust/Cargo.toml -- \
+//!   --data data/xauusd_m1_prior15d.bin --out experiments/ssa_h1/ssa_prior15d_hmulti_locked.json \
+//!   --forecast L --win 64 --l 16 --energy 90 --horizon 15
 //! ```
 
 use std::fs;
@@ -29,6 +36,7 @@ struct Cfg {
     energy_pct: f64,
     mode: ForecastMode,
     stride: usize,
+    horizon: usize,
 }
 
 #[derive(Serialize)]
@@ -37,6 +45,7 @@ struct Row {
     win: usize,
     l: usize,
     energy_pct: f64,
+    horizon: usize,
     dir_acc: f64,
     pnl_pct: f64,
     pnl_over_maxdd: Option<f64>,
@@ -146,6 +155,7 @@ fn empty_row(mode_s: &str, cfg: &Cfg, t0: Instant, error: &str) -> Row {
         win: cfg.win,
         l: cfg.l,
         energy_pct: cfg.energy_pct,
+        horizon: cfg.horizon,
         dir_acc: 0.0,
         pnl_pct: 0.0,
         pnl_over_maxdd: None,
@@ -163,6 +173,7 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
         ForecastMode::L => "L",
         ForecastMode::K => "K",
     };
+    let h = cfg.horizon;
 
     // ssa_rs: 2 <= L <= floor((N+1)/2) with N = win.
     let max_l = (cfg.win + 1) / 2;
@@ -172,9 +183,13 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
     if cfg.stride == 0 {
         return empty_row(mode_s, cfg, t0, "stride must be >= 1");
     }
+    if h == 0 {
+        return empty_row(mode_s, cfg, t0, "horizon must be >= 1");
+    }
 
     let i0 = cfg.win - 1;
-    let i1 = rets.len().saturating_sub(2);
+    // Need rets[i+H] and closes[i+1+H]; i1 = rets.len()-1-H
+    let i1 = rets.len().saturating_sub(1 + h);
     if i1 <= i0 {
         return empty_row(mode_s, cfg, t0, "series too short");
     }
@@ -206,19 +221,41 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
                 continue;
             }
             let fc = match cfg.mode {
-                ForecastMode::L => model.l_forecast(1, &idx, false),
-                ForecastMode::K => model.k_forecast(1, &idx, false),
+                ForecastMode::L => model.l_forecast(h, &idx, false),
+                ForecastMode::K => model.k_forecast(h, &idx, false),
             };
             if let Ok(m) = fc {
-                let sc = m[(0, 0)];
-                if sc.is_finite() {
-                    // rets[i+1] = ln(c[i+2]/c[i+1]); trade close[i+1] → close[i+2]
-                    scores.push(sc);
-                    next_rs.push(rets[i + 1]);
-                    c0s.push(closes[i + 1]);
-                    c1s.push(closes[i + 2]);
-                    n_comp_sum += idx.len() as f64;
-                    n_ok += 1;
+                // Score = sum of H forecasted log-returns
+                let mut sc = 0.0;
+                let mut ok = true;
+                for step in 0..h {
+                    let v = m[(step, 0)];
+                    if !v.is_finite() {
+                        ok = false;
+                        break;
+                    }
+                    sc += v;
+                }
+                if ok {
+                    // realized = sum rets[i+1..=i+H] = ln(c[i+1+H]/c[i+1])
+                    let mut realized = 0.0;
+                    for t in 1..=h {
+                        let r = rets[i + t];
+                        if !r.is_finite() {
+                            ok = false;
+                            break;
+                        }
+                        realized += r;
+                    }
+                    if ok {
+                        // trade close[i+1] → close[i+1+H]
+                        scores.push(sc);
+                        next_rs.push(realized);
+                        c0s.push(closes[i + 1]);
+                        c1s.push(closes[i + 1 + h]);
+                        n_comp_sum += idx.len() as f64;
+                        n_ok += 1;
+                    }
                 }
             }
         }
@@ -234,6 +271,7 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
         win: cfg.win,
         l: cfg.l,
         energy_pct: cfg.energy_pct,
+        horizon: h,
         dir_acc: dir,
         pnl_pct: pnl,
         pnl_over_maxdd: ratio,
@@ -248,17 +286,18 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
 struct Args {
     data: PathBuf,
     out: PathBuf,
-    /// If set, run only this config (locked OOS); else default grid.
+    /// If set, run only this config (locked OOS); else default multi-H grid.
     locked: Option<Cfg>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut data = PathBuf::from("data/xauusd_m1_prior5d_b.bin");
-    let mut out = PathBuf::from("experiments/ssa_h1/ssa_prior5d_b_rust.json");
+    let mut data = PathBuf::from("data/xauusd_m1_15d.bin");
+    let mut out = PathBuf::from("experiments/ssa_h1/ssa_15d_hmulti.json");
     let mut forecast: Option<ForecastMode> = None;
     let mut win: Option<usize> = None;
     let mut l: Option<usize> = None;
     let mut energy: Option<f64> = None;
+    let mut horizon: Option<usize> = None;
     let mut stride: usize = 3;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -298,6 +337,11 @@ fn parse_args() -> Result<Args, String> {
                 let v = args.get(i).ok_or("--energy needs a float")?;
                 energy = Some(v.parse().map_err(|_| "--energy must be float")?);
             }
+            "--horizon" | "-H" => {
+                i += 1;
+                let v = args.get(i).ok_or("--horizon needs an int")?;
+                horizon = Some(v.parse().map_err(|_| "--horizon must be int")?);
+            }
             "--stride" => {
                 i += 1;
                 let v = args.get(i).ok_or("--stride needs an int")?;
@@ -308,18 +352,19 @@ fn parse_args() -> Result<Args, String> {
         i += 1;
     }
 
-    let locked = match (forecast, win, l, energy) {
-        (None, None, None, None) => None,
-        (Some(mode), Some(win), Some(l), Some(energy_pct)) => Some(Cfg {
+    let locked = match (forecast, win, l, energy, horizon) {
+        (None, None, None, None, None) => None,
+        (Some(mode), Some(win), Some(l), Some(energy_pct), Some(horizon)) => Some(Cfg {
             win,
             l,
             energy_pct,
             mode,
             stride,
+            horizon,
         }),
         _ => {
             return Err(
-                "locked run needs all of --forecast --win --l --energy (or omit all for grid)"
+                "locked run needs all of --forecast --win --l --energy --horizon (or omit all for grid)"
                     .into(),
             )
         }
@@ -328,7 +373,8 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args { data, out, locked })
 }
 
-fn default_grid(stride: usize) -> Vec<Cfg> {
+/// Base (win, L, energy%, mode) configs — same 8 as H=1.
+fn base_configs() -> [(usize, usize, f64, ForecastMode); 8] {
     [
         (64usize, 16usize, 80.0, ForecastMode::L),
         (64, 16, 90.0, ForecastMode::L),
@@ -339,15 +385,25 @@ fn default_grid(stride: usize) -> Vec<Cfg> {
         (128, 40, 90.0, ForecastMode::L),
         (128, 40, 85.0, ForecastMode::K),
     ]
-    .into_iter()
-    .map(|(win, l, energy_pct, mode)| Cfg {
-        win,
-        l,
-        energy_pct,
-        mode,
-        stride,
-    })
-    .collect()
+}
+
+/// Default grid: horizons {5,15,30} × 8 configs, stride=3 → 24 rows.
+fn default_grid(stride: usize) -> Vec<Cfg> {
+    const HORIZONS: [usize; 3] = [5, 15, 30];
+    let mut out = Vec::with_capacity(HORIZONS.len() * 8);
+    for &horizon in &HORIZONS {
+        for &(win, l, energy_pct, mode) in &base_configs() {
+            out.push(Cfg {
+                win,
+                l,
+                energy_pct,
+                mode,
+                stride,
+                horizon,
+            });
+        }
+    }
+    out
 }
 
 fn main() {
@@ -369,7 +425,7 @@ fn main() {
     }
     let rets = log_returns(&closes);
     println!(
-        "SSA Rust H=1 | bars={} returns={} data={}",
+        "SSA Rust multi-H | bars={} returns={} data={}",
         closes.len(),
         rets.len(),
         data.display()
@@ -378,7 +434,7 @@ fn main() {
     let grid: Vec<Cfg> = match args.locked {
         Some(cfg) => {
             println!(
-                "LOCKED fc={} win={} L={} E={:.0}% stride={}",
+                "LOCKED fc={} win={} L={} E={:.0}% H={} stride={}",
                 match cfg.mode {
                     ForecastMode::L => "L",
                     ForecastMode::K => "K",
@@ -386,11 +442,16 @@ fn main() {
                 cfg.win,
                 cfg.l,
                 cfg.energy_pct,
+                cfg.horizon,
                 cfg.stride
             );
             vec![cfg]
         }
-        None => default_grid(3),
+        None => {
+            let g = default_grid(3);
+            println!("GRID {} configs (H∈{{5,15,30}} × 8), stride=3", g.len());
+            g
+        }
     };
 
     let rows: Vec<Row> = grid
@@ -400,11 +461,12 @@ fn main() {
 
     for r in &rows {
         println!(
-            "fc={} win={} L={} E={:.0}% dir={:.4} pnl={:+.2}% pnl/dd={:?} k_avg={:.1} n={} t={:.1}s err={:?}",
+            "fc={} win={} L={} E={:.0}% H={} dir={:.4} pnl={:+.2}% pnl/dd={:?} k_avg={:.1} n={} t={:.1}s err={:?}",
             r.forecast,
             r.win,
             r.l,
             r.energy_pct,
+            r.horizon,
             r.dir_acc,
             r.pnl_pct,
             r.pnl_over_maxdd,
@@ -428,11 +490,12 @@ fn main() {
 
     if let Some(b) = best {
         println!(
-            "\nBEST fc={} win={} L={} E={:.0}% | dir={:.2}% | PnL={:+.2}% | PnL/MaxDD={:.2}",
+            "\nBEST fc={} win={} L={} E={:.0}% H={} | dir={:.2}% | PnL={:+.2}% | PnL/MaxDD={:.2}",
             b.forecast,
             b.win,
             b.l,
             b.energy_pct,
+            b.horizon,
             100.0 * b.dir_acc,
             b.pnl_pct,
             b.pnl_over_maxdd.unwrap_or(f64::NAN)
@@ -442,9 +505,10 @@ fn main() {
     let locked = rows.len() == 1;
     let payload = serde_json::json!({
         "runtime": "rust+ssa_rs",
-        "architecture": "fit -> cumsum contribution signal group -> L/K forecast H=1",
+        "architecture": "fit -> cumsum contribution signal group -> L/K forecast H steps; score=sum of H forecasted log-returns; PnL hold close[i+1]->close[i+1+H]",
         "data": data.to_string_lossy(),
         "locked_config": locked,
+        "horizons": if locked { serde_json::json!([rows[0].horizon]) } else { serde_json::json!([5, 15, 30]) },
         "metrics_only": ["dir_acc", "pnl_pct", "pnl_over_maxdd"],
         "rows": rows,
         "best": best,
