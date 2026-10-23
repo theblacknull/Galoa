@@ -2,6 +2,7 @@
 //! Also: SpecReTF-style always-FIRE offline eval (`eval-specretf`).
 
 mod api;
+mod eval_paper;
 mod eval_specretf;
 mod pipeline;
 
@@ -74,6 +75,37 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         scan: bool,
         /// Pretty-print JSON to stdout
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// SpecReTF retrieval-only on paper datasets (ETT/Exchange; train→test protocol).
+    ///
+    /// STFT on StandardScaler raw values; no neural fusion (eq. 11). Compare MSE
+    /// to paper Table 1 SpecReTF/RAFT with an expected gap.
+    EvalPaperSpecretf {
+        #[arg(long, default_value = "data/ETT/ETTh1.csv")]
+        data: PathBuf,
+        #[arg(long, default_value = "ETTh1")]
+        dataset: String,
+        #[arg(long, default_value_t = 720)]
+        lookback: usize,
+        /// Comma-separated horizons, e.g. `96` or `96,192,336,720`.
+        #[arg(long, default_value = "96")]
+        horizons: String,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        #[arg(long, default_value_t = 32)]
+        n_fft: usize,
+        #[arg(long, default_value_t = 16)]
+        hop: usize,
+        #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
+        ema_alpha: f64,
+        #[arg(long, default_value_t = 4)]
+        library_stride: usize,
+        #[arg(long, default_value_t = 24)]
+        query_stride: usize,
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -220,6 +252,45 @@ async fn main() -> Result<()> {
                 } else {
                     pipeline::print_human(&result);
                 }
+            }
+        }
+        Commands::EvalPaperSpecretf {
+            data,
+            dataset,
+            lookback,
+            horizons,
+            k,
+            n_fft,
+            hop,
+            ema_alpha,
+            library_stride,
+            query_stride,
+            metrics_out,
+            json,
+        } => {
+            let horizons: Vec<usize> = horizons
+                .split(',')
+                .map(|s| s.trim().parse::<usize>())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("parse --horizons (comma-separated ints)")?;
+            let opts = eval_paper::PaperEvalOpts {
+                data: data.clone(),
+                dataset,
+                lookback,
+                horizons,
+                k,
+                n_fft,
+                hop,
+                ema_alpha,
+                library_stride,
+                query_stride,
+                metrics_out,
+            };
+            let report = eval_paper::run_paper(&opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                eval_paper::print_report(&report, &data);
             }
         }
         Commands::EvalSpecretf {

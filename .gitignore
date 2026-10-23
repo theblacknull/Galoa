@@ -7,3 +7,5 @@
 .DS_Store
 .idea/
 .vscode/
+# Large paper benchmark CSVs — download via scripts/download_paper_datasets.sh
+/data/ETT/*.csv

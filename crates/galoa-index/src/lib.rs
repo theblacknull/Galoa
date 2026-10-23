@@ -5,8 +5,13 @@
 //!
 //! Time-domain z-norm L2 matching is not a product path (eval baseline only).
 
+mod paper_eval;
 mod specretf;
 
+pub use paper_eval::{
+    run_etth_multi_horizon, run_paper_eval, PaperEvalConfig, PaperEvalError, PaperEvalReport,
+    PaperHorizonReport, PaperMethodMetrics,
+};
 pub use specretf::{
     run_specretf_eval, EvalConfig, EvalReport, MethodMetrics, SpecForecastResult, SpecNeighbor,
     SpecReTfEntry, SpecReTfIndex, SpecReTfIndexError,

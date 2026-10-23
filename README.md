@@ -37,6 +37,14 @@ cargo run -p galoa --release -- eval-specretf --data data/xauusd_m1_5d.bin
 cargo run -p galoa --release -- eval-specretf --data data/xauusd_m1_5d.bin \
   --metrics-out /tmp/specretf-metrics.json --json
 
+# Paper-protocol retrieval-only on ETT/Exchange (no neural fusion; CSV via download script)
+bash scripts/download_paper_datasets.sh
+cargo run -p galoa --release -- eval-paper-specretf \
+  --data data/ETT/ETTh1.csv --dataset ETTh1 \
+  --lookback 720 --horizons 96,192,336,720 \
+  --k 10 --n-fft 32 --hop 16 --ema-alpha 0.1 \
+  --library-stride 4 --query-stride 24
+
 # Dev-only synthetic / HTTP
 cargo run -p galoa -- forecast --synthetic --json
 cargo run -p galoa -- serve --port 3000
