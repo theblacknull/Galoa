@@ -2,7 +2,7 @@
   "architecture": "fit -> cumsum contribution signal group -> L/K forecast H=1",
   "best": {
     "dir_acc": 0.5037537537537538,
-    "elapsed_sec": 0.3987918,
+    "elapsed_sec": 0.404348,
     "energy_pct": 85.0,
     "error": null,
     "forecast": "K",
@@ -23,7 +23,7 @@
   "rows": [
     {
       "dir_acc": 0.48518518518518516,
-      "elapsed_sec": 0.1424031,
+      "elapsed_sec": 0.1591299,
       "energy_pct": 80.0,
       "error": null,
       "forecast": "L",
@@ -37,7 +37,7 @@
     },
     {
       "dir_acc": 0.48814814814814816,
-      "elapsed_sec": 0.1407828,
+      "elapsed_sec": 0.161451,
       "energy_pct": 90.0,
       "error": null,
       "forecast": "L",
@@ -51,7 +51,7 @@
     },
     {
       "dir_acc": 0.49624624624624625,
-      "elapsed_sec": 0.2505368,
+      "elapsed_sec": 0.2740892,
       "energy_pct": 85.0,
       "error": null,
       "forecast": "L",
@@ -65,7 +65,7 @@
     },
     {
       "dir_acc": 0.484984984984985,
-      "elapsed_sec": 0.3869178,
+      "elapsed_sec": 0.400506,
       "energy_pct": 85.0,
       "error": null,
       "forecast": "L",
@@ -79,7 +79,7 @@
     },
     {
       "dir_acc": 0.5037537537537538,
-      "elapsed_sec": 0.3987918,
+      "elapsed_sec": 0.404348,
       "energy_pct": 85.0,
       "error": null,
       "forecast": "K",
@@ -93,7 +93,7 @@
     },
     {
       "dir_acc": 0.5090225563909775,
-      "elapsed_sec": 0.4255078,
+      "elapsed_sec": 0.4488209,
       "energy_pct": 85.0,
       "error": null,
       "forecast": "L",
@@ -107,7 +107,7 @@
     },
     {
       "dir_acc": 0.5075187969924813,
-      "elapsed_sec": 0.5843053,
+      "elapsed_sec": 0.6337342,
       "energy_pct": 90.0,
       "error": null,
       "forecast": "L",
@@ -121,7 +121,7 @@
     },
     {
       "dir_acc": 0.5007518796992482,
-      "elapsed_sec": 0.5924879,
+      "elapsed_sec": 0.6486583,
       "energy_pct": 85.0,
       "error": null,
       "forecast": "K",
@@ -135,5 +135,5 @@
     }
   ],
   "runtime": "rust+ssa_rs",
-  "wall_sec": 0.5934076
+  "wall_sec": 0.6498941
 }

@@ -26,3 +26,5 @@ Metric: dir / PnL% / PnL÷MaxDD.
 
 - `.env` (gitignored): `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER` / `MT5_SYMBOL`
 - Dump MT5: `python scripts/dump_mt5_xauusd_m1.py --native --days 5 --stem …`
+- Attach terminal đã login: thêm `--attach` (không cần password)
+- CSV debug: thêm `--csv` (mặc định chỉ ghi `.bin`)

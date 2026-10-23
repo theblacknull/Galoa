@@ -9,3 +9,5 @@
 __pycache__/
 ssa/**/target/
 experiments/ssa_h1/rust/target/
+# debug dumps (canonical is data/*.bin)
+data/*.csv

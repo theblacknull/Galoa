@@ -1,4 +1,4 @@
-symbol=XAUUSD
+﻿symbol=XAUUSD
 timeframe=M1
 close_convention=mt5_bar_close_bid
 bars=6764
@@ -9,4 +9,4 @@ login=15044694
 source=IC_Markets_MT5_demo_attached_terminal
 note=recent_5_calendar_days_ending_at_last_bar
 canonical=data/xauusd_m1_5d.bin
-debug_csv=data/xauusd_m1_5d.csv
+debug_csv=none

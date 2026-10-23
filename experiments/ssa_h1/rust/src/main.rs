@@ -54,7 +54,8 @@ fn load_galoa_closes(path: &PathBuf) -> Result<Vec<f64>, String> {
     }
     let n = u64::from_le_bytes(buf[8..16].try_into().unwrap()) as usize;
     let off = 16 + n * 8;
-    if buf.len() < off + n * 8 {
+    let need = off.checked_add(n.saturating_mul(8)).ok_or("GALOAP1 size overflow")?;
+    if buf.len() < need {
         return Err("truncated GALOAP1".into());
     }
     let mut closes = Vec::with_capacity(n);
@@ -66,31 +67,50 @@ fn load_galoa_closes(path: &PathBuf) -> Result<Vec<f64>, String> {
 }
 
 fn log_returns(c: &[f64]) -> Vec<f64> {
-    c.windows(2).map(|w| (w[1] / w[0]).ln()).collect()
+    c.windows(2)
+        .map(|w| {
+            if w[0] > 0.0 && w[1] > 0.0 {
+                (w[1] / w[0]).ln()
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
 }
 
+/// Indices of leading eigentriples whose cumsum contribution reaches `energy_pct` (0–100).
 fn signal_components(cumsum: &[f64], d: usize, energy_pct: f64) -> Vec<usize> {
-    if cumsum.is_empty() || d == 0 {
-        return vec![0];
+    if d == 0 {
+        return Vec::new();
     }
-    let mut k = cumsum
+    let k = cumsum
         .iter()
         .position(|&v| v >= energy_pct)
         .map(|i| i + 1)
-        .unwrap_or(d);
-    k = k.max(1).min(d.saturating_sub(1).max(1));
+        .unwrap_or(d)
+        .clamp(1, d);
     (0..k).collect()
+}
+
+fn side_of(score: f64) -> f64 {
+    if score > 0.0 {
+        1.0
+    } else if score < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
 }
 
 fn eval_three(scores: &[f64], next_r: &[f64], c0: &[f64], c1: &[f64]) -> (f64, f64, f64, Option<f64>) {
     let mut hits = 0usize;
     let mut nz = 0usize;
     for (s, r) in scores.iter().zip(next_r.iter()) {
-        if *r == 0.0 {
+        let side = side_of(*s);
+        if side == 0.0 || *r == 0.0 {
             continue;
         }
         nz += 1;
-        let side = if *s < 0.0 { -1.0 } else { 1.0 };
         if side == r.signum() {
             hits += 1;
         }
@@ -101,10 +121,13 @@ fn eval_three(scores: &[f64], next_r: &[f64], c0: &[f64], c1: &[f64]) -> (f64, f
     let mut peak = eq;
     let mut max_dd = 0.0_f64;
     for ((s, a), b) in scores.iter().zip(c0.iter()).zip(c1.iter()) {
-        if *a <= 0.0 {
+        if *a <= 0.0 || *b <= 0.0 {
             continue;
         }
-        let side = if *s < 0.0 { -1.0 } else { 1.0 };
+        let side = side_of(*s);
+        if side == 0.0 {
+            continue;
+        }
         eq *= 1.0 + side * (b / a - 1.0);
         peak = peak.max(eq);
         if peak > 0.0 {
@@ -117,29 +140,43 @@ fn eval_three(scores: &[f64], next_r: &[f64], c0: &[f64], c1: &[f64]) -> (f64, f
     (dir, pnl, mdd, ratio)
 }
 
+fn empty_row(mode_s: &str, cfg: &Cfg, t0: Instant, error: &str) -> Row {
+    Row {
+        forecast: mode_s.into(),
+        win: cfg.win,
+        l: cfg.l,
+        energy_pct: cfg.energy_pct,
+        dir_acc: 0.0,
+        pnl_pct: 0.0,
+        pnl_over_maxdd: None,
+        max_dd_pct: 0.0,
+        n: 0,
+        mean_n_comp: 0.0,
+        elapsed_sec: t0.elapsed().as_secs_f64(),
+        error: Some(error.into()),
+    }
+}
+
 fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
     let t0 = Instant::now();
     let mode_s = match cfg.mode {
         ForecastMode::L => "L",
         ForecastMode::K => "K",
     };
+
+    // ssa_rs: 2 <= L <= floor((N+1)/2) with N = win.
+    let max_l = (cfg.win + 1) / 2;
+    if cfg.l < 2 || cfg.l > max_l {
+        return empty_row(mode_s, cfg, t0, "invalid L for win");
+    }
+    if cfg.stride == 0 {
+        return empty_row(mode_s, cfg, t0, "stride must be >= 1");
+    }
+
     let i0 = cfg.win - 1;
     let i1 = rets.len().saturating_sub(2);
     if i1 <= i0 {
-        return Row {
-            forecast: mode_s.into(),
-            win: cfg.win,
-            l: cfg.l,
-            energy_pct: cfg.energy_pct,
-            dir_acc: 0.0,
-            pnl_pct: 0.0,
-            pnl_over_maxdd: None,
-            max_dd_pct: 0.0,
-            n: 0,
-            mean_n_comp: 0.0,
-            elapsed_sec: t0.elapsed().as_secs_f64(),
-            error: Some("series too short".into()),
-        };
+        return empty_row(mode_s, cfg, t0, "series too short");
     }
 
     let mut scores = Vec::new();
@@ -162,48 +199,34 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
             i += 1;
             continue;
         }
-        match ssa.fit(seg, Some(cfg.l)) {
-            Ok(model) => {
-                let idx = signal_components(&model.cumsum_contr, model.d, cfg.energy_pct);
-                let fc = match cfg.mode {
-                    ForecastMode::L => model.l_forecast(1, &idx, false),
-                    ForecastMode::K => model.k_forecast(1, &idx, false),
-                };
-                match fc {
-                    Ok(m) => {
-                        let sc = m[(0, 0)];
-                        if sc.is_finite() {
-                            scores.push(sc);
-                            next_rs.push(rets[i + 1]);
-                            c0s.push(closes[i + 1]);
-                            c1s.push(closes[i + 2]);
-                            n_comp_sum += idx.len() as f64;
-                            n_ok += 1;
-                        }
-                    }
-                    Err(_) => {}
+        if let Ok(model) = ssa.fit(seg, Some(cfg.l)) {
+            let idx = signal_components(&model.cumsum_contr, model.d, cfg.energy_pct);
+            if idx.is_empty() {
+                i += 1;
+                continue;
+            }
+            let fc = match cfg.mode {
+                ForecastMode::L => model.l_forecast(1, &idx, false),
+                ForecastMode::K => model.k_forecast(1, &idx, false),
+            };
+            if let Ok(m) = fc {
+                let sc = m[(0, 0)];
+                if sc.is_finite() {
+                    // rets[i+1] = ln(c[i+2]/c[i+1]); trade close[i+1] → close[i+2]
+                    scores.push(sc);
+                    next_rs.push(rets[i + 1]);
+                    c0s.push(closes[i + 1]);
+                    c1s.push(closes[i + 2]);
+                    n_comp_sum += idx.len() as f64;
+                    n_ok += 1;
                 }
             }
-            Err(_) => {}
         }
         i += 1;
     }
 
-    if scores.is_empty() {
-        return Row {
-            forecast: mode_s.into(),
-            win: cfg.win,
-            l: cfg.l,
-            energy_pct: cfg.energy_pct,
-            dir_acc: 0.0,
-            pnl_pct: 0.0,
-            pnl_over_maxdd: None,
-            max_dd_pct: 0.0,
-            n: 0,
-            mean_n_comp: 0.0,
-            elapsed_sec: t0.elapsed().as_secs_f64(),
-            error: Some("no_scores".into()),
-        };
+    if scores.is_empty() || n_ok == 0 {
+        return empty_row(mode_s, cfg, t0, "no_scores");
     }
     let (dir, pnl, mdd, ratio) = eval_three(&scores, &next_rs, &c0s, &c1s);
     Row {
@@ -222,7 +245,7 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
     }
 }
 
-fn main() {
+fn parse_args() -> Result<(PathBuf, PathBuf), String> {
     let mut data = PathBuf::from("data/xauusd_m1_prior5d_b.bin");
     let mut out = PathBuf::from("experiments/ssa_h1/ssa_prior5d_b_rust.json");
     let args: Vec<String> = std::env::args().collect();
@@ -231,25 +254,36 @@ fn main() {
         match args[i].as_str() {
             "--data" => {
                 i += 1;
-                data = PathBuf::from(&args[i]);
+                let v = args.get(i).ok_or("--data needs a path")?;
+                data = PathBuf::from(v);
             }
             "--out" => {
                 i += 1;
-                out = PathBuf::from(&args[i]);
+                let v = args.get(i).ok_or("--out needs a path")?;
+                out = PathBuf::from(v);
             }
-            other => {
-                eprintln!("unknown arg {other}");
-                std::process::exit(2);
-            }
+            other => return Err(format!("unknown arg {other}")),
         }
         i += 1;
     }
+    Ok((data, out))
+}
+
+fn main() {
+    let (data, out) = parse_args().unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
 
     let wall0 = Instant::now();
     let closes = load_galoa_closes(&data).unwrap_or_else(|e| {
         eprintln!("load failed: {e}");
         std::process::exit(1);
     });
+    if closes.len() < 3 {
+        eprintln!("need at least 3 closes");
+        std::process::exit(1);
+    }
     let rets = log_returns(&closes);
     println!(
         "SSA Rust H=1 | bars={} returns={} data={}",
@@ -304,17 +338,11 @@ fn main() {
         .iter()
         .filter(|r| r.error.is_none())
         .max_by(|a, b| {
-            let ka = (
-                a.pnl_over_maxdd.unwrap_or(f64::NEG_INFINITY),
-                a.dir_acc,
-                a.pnl_pct,
-            );
-            let kb = (
-                b.pnl_over_maxdd.unwrap_or(f64::NEG_INFINITY),
-                b.dir_acc,
-                b.pnl_pct,
-            );
-            ka.partial_cmp(&kb).unwrap()
+            a.pnl_over_maxdd
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&b.pnl_over_maxdd.unwrap_or(f64::NEG_INFINITY))
+                .then(a.dir_acc.total_cmp(&b.dir_acc))
+                .then(a.pnl_pct.total_cmp(&b.pnl_pct))
         });
 
     if let Some(b) = best {
@@ -343,5 +371,9 @@ fn main() {
         let _ = fs::create_dir_all(parent);
     }
     fs::write(&out, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
-    println!("wall={:.1}s wrote {}", wall0.elapsed().as_secs_f64(), out.display());
+    println!(
+        "wall={:.1}s wrote {}",
+        wall0.elapsed().as_secs_f64(),
+        out.display()
+    );
 }
