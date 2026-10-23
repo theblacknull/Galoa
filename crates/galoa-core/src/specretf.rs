@@ -87,7 +87,12 @@ pub struct SpectralDescriptor {
     pub frames: Vec<SpectralFrame>,
 }
 
-/// Periodic Hann (Hanning) window of length `n` — same family as paper “Hanning”.
+/// Symmetric Hann (Hanning) window of length `n` — same family as paper “Hanning”.
+///
+/// Formula: `0.5 (1 − cos(2π i / (n−1)))`, endpoints zero. Paper §4.1 only says
+/// “Hanning … 50% overlap”; does not specify periodic vs symmetric. PyTorch’s
+/// default `hann_window(periodic=True)` differs slightly — treated as ambiguous,
+/// not switched here without an explicit paper claim.
 fn hann(n: usize) -> Vec<f64> {
     if n == 1 {
         return vec![1.0];
