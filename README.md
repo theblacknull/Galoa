@@ -3,7 +3,7 @@
 Real-time **spectral similar-segment** price forecasting (Rust). Matching is **spectral-only** on M1 close (bid):
 
 1. **Live / gated path:** log-returns → STFT magnitude → exact kNN → selective gates → **ABSTAIN** (default) or **FIRE**
-2. **SpecReTF offline eval:** STFT frames → Jensen–Shannon(amplitude) + phase cosine + EMA recency → top-K → weighted aggregate futures (**always FIRE** — phase-1 accuracy protocol)
+2. **SpecReTF offline eval** (arXiv:2606.19412 §3.2–3.3): Hanning STFT 50% hop → JSD₂ amp + `cos(mean ΔΦ)` → `s=s_amp+s_phase` → EMA (no renormalize) → top-K → **softmax** futures (**always FIRE**)
 
 There is **no** time-domain product matching path (z-norm L2 appears only as an eval baseline).
 
@@ -48,7 +48,8 @@ cargo run -p galoa -- serve --port 3000
 |-------|------------------|---------------------------|
 | `W` / `H` / `k` | 64 / 16 / 10 | 64 / 16 / 10 |
 | STFT | `n_fft=16` `hop=4` (mag → F) | `n_fft=16` `hop=8` (~50% overlap), Hann |
-| Score | L2 on L2-normalized mag features | JS(amp dist) + phase cosine + EMA α=0.1 |
+| Score | L2 on L2-normalized mag features | `s_amp=1−JSD₂` + `cos(mean ΔΦ)`; `S=Σα(1−α)^{W−w}s` |
+| Aggregate | gated ensemble | **softmax(`S_k`)** over level-aligned futures |
 | Gates | `d_max` / `n_min` / `σ_max` | **none** (always FIRE) |
 
 Override: `--window --horizon --k --n-fft --hop` (+ `--ema-alpha --stride` for eval).
@@ -64,10 +65,11 @@ M1 close bid → log-returns → STFT magnitude → F → kNN → gates → ABST
 **SpecReTF eval (phase 1):**
 
 ```
-M1 close bid → log-returns → STFT frames (amp+phase)
-  → JS(amp) + cosine(phase) + EMA recency → top-K (exclude overlap, causal)
-  → level-align futures → weighted mean / median / P10 / P90
-  → metrics vs actual (MSE/MAE, direction, band coverage)
+M1 close bid → log-returns → STFT (Hanning, B=M/2, M bins)
+  → p=A/ΣA → JSD₂ → s_amp=1−JSD; s_phase=cos(mean ΔΦ); s=s_amp+s_phase
+  → S=Σ α(1−α)^{W−w} s^w (no weight renormalize)
+  → top-K causal → level-align Y → softmax(S) aggregate + P10/P90
+  → metrics vs actual (MSE/MAE, direction, band)
 ```
 
 ## Refresh Gold from MT5

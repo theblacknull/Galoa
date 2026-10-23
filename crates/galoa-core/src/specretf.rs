@@ -1,37 +1,40 @@
-//! SpecReTF-style spectral similarity on log-return windows.
+//! SpecReTF frequency-aware similarity (arXiv:2606.19412 §3.2).
 //!
-//! Pipeline (retrieval core only — no neural fusion):
-//! 1. STFT (Hann, ~50% overlap) → per-frame amplitude + phase
-//! 2. Amplitude → probability distribution → Jensen–Shannon vs candidate
-//! 3. Phase → mean cosine of Δφ
-//! 4. Combine into a per-frame score; optional EMA recency across frames
+//! Paper equations implemented literally (retrieval core only; no neural fusion):
 //!
-//! Defaults for `W=64` closes → 63 returns: `n_fft=16`, `hop=8` (50% overlap).
+//! 1. STFT with **Hanning** window, hop `B ≈ M/2` (50% overlap). Each frame yields
+//!    an **M-dimensional** complex spectrum (Appendix G).
+//! 2. Amplitude → probability: `p(f) = A(f) / Σ_f A(f)`  (eq. 2)
+//! 3. `d_JS = JSD(p_Q ‖ p_X)` with **log₂** so `d_JS ∈ [0,1]`, then
+//!    `s_amp = 1 − d_JS`  (eq. 3–4)
+//! 4. Phase: `ΔΦ = (1/M) Σ_f (Φ_Q(f) − Φ_X(f))`, `s_phase = cos(ΔΦ)`  (eq. 5–6)
+//!    — cosine of the **mean** phase difference, not mean of cosines.
+//! 5. Frame score: `s^w = s_amp^w + s_phase^w`  (eq. 7) — unweighted sum
+//! 6. Recency: `S = Σ_{w=1}^{W} α (1−α)^{W−w} s^w`  (eq. 8) — **not** renormalized
+//!
+//! Defaults (Table 5 / impl details): `M=window_size∈{8,16,32}`, α∈{0.01…0.2}, K~10.
 
 use rustfft::{num_complex::Complex, FftPlanner};
 use thiserror::Error;
 
-/// SpecReTF-default FFT size (small frames, paper-like {8,16,32}).
+/// SpecReTF default STFT frame length `M` (Table 5 `window_size`).
 pub const SPECRETF_N_FFT: usize = 16;
-/// 50% overlap hop for `SPECRETF_N_FFT`.
+/// 50% overlap hop `B = M/2` (impl details + Appendix G).
 pub const SPECRETF_HOP: usize = 8;
-/// Default EMA recency α (recent frames weighted more).
+/// Default recency decay α (Table 5 / Fig. 3 mid-range).
 pub const SPECRETF_EMA_ALPHA: f64 = 0.1;
-/// Relative weight on amplitude similarity vs phase (amp dominates per SpecReTF ablation).
-pub const SPECRETF_AMP_WEIGHT: f64 = 0.7;
-pub const SPECRETF_PHASE_WEIGHT: f64 = 0.3;
 
-const LN2: f64 = std::f64::consts::LN_2;
 const EPS: f64 = 1e-12;
+const LN2: f64 = std::f64::consts::LN_2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpecReTfParams {
+    /// STFT frame length `M` (paper `window_size`).
     pub n_fft: usize,
+    /// Hop `B`; paper uses ≈ `M/2` (50% overlap).
     pub hop: usize,
-    /// EMA α ∈ (0,1]; higher → more weight on recent frames. `0` = uniform mean.
+    /// Recency decay α ∈ (0,1) in eq. (8). `≤0` → uniform mean (ablation “w/o recency”).
     pub ema_alpha: f64,
-    pub amp_weight: f64,
-    pub phase_weight: f64,
 }
 
 impl Default for SpecReTfParams {
@@ -40,28 +43,23 @@ impl Default for SpecReTfParams {
             n_fft: SPECRETF_N_FFT,
             hop: SPECRETF_HOP,
             ema_alpha: SPECRETF_EMA_ALPHA,
-            amp_weight: SPECRETF_AMP_WEIGHT,
-            phase_weight: SPECRETF_PHASE_WEIGHT,
         }
     }
 }
 
 impl SpecReTfParams {
+    /// Full FFT length = number of frequency bins per frame (Appendix G: M-dim spectrum).
     pub fn bins_per_frame(&self) -> usize {
-        self.n_fft / 2 + 1
+        self.n_fft
     }
 
     pub fn num_frames(&self, signal_len: usize) -> usize {
-        if len_ok(signal_len, self.n_fft, self.hop) {
-            1 + (signal_len - self.n_fft) / self.hop
-        } else {
+        if self.n_fft == 0 || self.hop == 0 || signal_len < self.n_fft {
             0
+        } else {
+            1 + (signal_len - self.n_fft) / self.hop
         }
     }
-}
-
-fn len_ok(len: usize, n_fft: usize, hop: usize) -> bool {
-    n_fft > 0 && hop > 0 && len >= n_fft
 }
 
 #[derive(Debug, Error)]
@@ -74,21 +72,22 @@ pub enum SpecReTfError {
     FrameMismatch,
 }
 
-/// One STFT frame: amplitude as a probability distribution + phase radians.
+/// One STFT frame: amplitude as a probability distribution + phase (radians).
 #[derive(Clone, Debug)]
 pub struct SpectralFrame {
-    /// Onesided magnitude bins normalized to sum ≈ 1.
+    /// Length-`M` amplitude bins normalized to sum ≈ 1 (eq. 2).
     pub amp_dist: Vec<f64>,
-    /// Onesided phase (atan2) per bin.
+    /// Length-`M` phase `atan2(Im, Re)` per FFT bin.
     pub phase: Vec<f64>,
 }
 
-/// Precomputed SpecReTF descriptor for one window of log-returns.
+/// Precomputed SpecReTF descriptor for one length-`L` signal window.
 #[derive(Clone, Debug)]
 pub struct SpectralDescriptor {
     pub frames: Vec<SpectralFrame>,
 }
 
+/// Periodic Hann (Hanning) window of length `n` — same family as paper “Hanning”.
 fn hann(n: usize) -> Vec<f64> {
     if n == 1 {
         return vec![1.0];
@@ -101,7 +100,7 @@ fn hann(n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Build a SpecReTF spectral descriptor from a log-return signal.
+/// Build SpecReTF spectral descriptor via STFT (eq. 1–2).
 pub fn spectral_descriptor(
     signal: &[f64],
     params: &SpecReTfParams,
@@ -117,24 +116,25 @@ pub fn spectral_descriptor(
     }
 
     let n_frames = params.num_frames(signal.len());
-    let bins = params.bins_per_frame();
-    let win = hann(params.n_fft);
+    let m = params.n_fft;
+    let win = hann(m);
 
     let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(params.n_fft);
-    let mut buf = vec![Complex::new(0.0, 0.0); params.n_fft];
+    let fft = planner.plan_fft_forward(m);
+    let mut buf = vec![Complex::new(0.0, 0.0); m];
     let mut frames = Vec::with_capacity(n_frames);
 
     for f in 0..n_frames {
         let start = f * params.hop;
-        for i in 0..params.n_fft {
+        for i in 0..m {
             buf[i] = Complex::new(signal[start + i] * win[i], 0.0);
         }
         fft.process(&mut buf);
 
-        let mut amp = Vec::with_capacity(bins);
-        let mut phase = Vec::with_capacity(bins);
-        for b in 0..bins {
+        // Full M-bin spectrum (Appendix G), not onesided.
+        let mut amp = Vec::with_capacity(m);
+        let mut phase = Vec::with_capacity(m);
+        for b in 0..m {
             amp.push(buf[b].norm());
             phase.push(buf[b].arg());
         }
@@ -162,7 +162,9 @@ fn normalize_distribution(v: &mut [f64]) {
     }
 }
 
-/// Jensen–Shannon divergence (natural log). Range ≈ [0, ln 2].
+/// Jensen–Shannon divergence with **log₂** (so `JSD ∈ [0, 1]` and eq. 4 holds).
+///
+/// `JSD(P‖Q) = ½ KL₂(P‖M) + ½ KL₂(Q‖M)`, `M = ½(P+Q)`.
 pub fn js_divergence(p: &[f64], q: &[f64]) -> f64 {
     debug_assert_eq!(p.len(), q.len());
     let n = p.len().min(q.len());
@@ -171,38 +173,35 @@ pub fn js_divergence(p: &[f64], q: &[f64]) -> f64 {
         let pi = p[i].max(EPS);
         let qi = q[i].max(EPS);
         let m = 0.5 * (pi + qi);
-        js += 0.5 * pi * (pi / m).ln() + 0.5 * qi * (qi / m).ln();
+        // log2(x) = ln(x)/ln(2)
+        js += 0.5 * pi * ((pi / m).ln() / LN2) + 0.5 * qi * ((qi / m).ln() / LN2);
     }
-    js.max(0.0)
+    js.max(0.0).min(1.0)
 }
 
-/// Mean cosine of phase difference: `(1/B) Σ cos(φ_p − φ_q)` ∈ [-1, 1].
+/// Phase coherence (eq. 5–6): `cos( mean_f (Φ_Q − Φ_X) )` ∈ [-1, 1].
 pub fn phase_cosine(p: &[f64], q: &[f64]) -> f64 {
     let n = p.len().min(q.len());
     if n == 0 {
         return 0.0;
     }
-    let s: f64 = (0..n).map(|i| (p[i] - q[i]).cos()).sum();
-    s / n as f64
+    let mean_delta: f64 = (0..n).map(|i| p[i] - q[i]).sum::<f64>() / n as f64;
+    mean_delta.cos()
 }
 
-/// Per-frame similarity in roughly [0, 1] (amp JS + phase cosine).
-pub fn frame_similarity(a: &SpectralFrame, b: &SpectralFrame, params: &SpecReTfParams) -> f64 {
-    let js = js_divergence(&a.amp_dist, &b.amp_dist);
-    // Map JS ∈ [0, ln2] → similarity ∈ [0, 1]
-    let amp_sim = (1.0 - (js / LN2).clamp(0.0, 1.0)).clamp(0.0, 1.0);
-    let phase_sim = ((phase_cosine(&a.phase, &b.phase) + 1.0) * 0.5).clamp(0.0, 1.0);
-    let w_sum = params.amp_weight + params.phase_weight;
-    if w_sum <= 0.0 {
-        return 0.5 * amp_sim + 0.5 * phase_sim;
-    }
-    (params.amp_weight * amp_sim + params.phase_weight * phase_sim) / w_sum
+/// Frame-level composite score (eq. 4 + 6 + 7): `s = (1 − JSD) + cos(ΔΦ)`.
+pub fn frame_similarity(a: &SpectralFrame, b: &SpectralFrame, _params: &SpecReTfParams) -> f64 {
+    let d_js = js_divergence(&a.amp_dist, &b.amp_dist);
+    let s_amp = 1.0 - d_js;
+    let s_phase = phase_cosine(&a.phase, &b.phase);
+    s_amp + s_phase
 }
 
-/// SpecReTF window similarity with optional EMA recency (recent frames matter more).
+/// Window similarity `S(Q, X_k)` (eq. 8).
 ///
-/// With `ema_alpha == 0`: uniform mean of frame similarities.
-/// Else: normalized exponential weights `α(1−α)^{F−1−f}` from oldest (f=0) to newest.
+/// `S = Σ_{w=1}^{W} α (1−α)^{W−w} s^w` with `w=1` oldest, `w=W` newest.
+/// **Not** divided by Σ weights — absolute scale feeds softmax in eq. (10).
+/// If `ema_alpha ≤ 0`, uses uniform mean of frame scores (ablation “w/o recency”).
 pub fn spectral_similarity(
     query: &SpectralDescriptor,
     cand: &SpectralDescriptor,
@@ -212,9 +211,6 @@ pub fn spectral_similarity(
     if n == 0 {
         return Err(SpecReTfError::FrameMismatch);
     }
-    if query.frames.len() != cand.frames.len() {
-        // Still compare overlapping prefix; callers should use same STFT geometry.
-    }
 
     let mut sims = Vec::with_capacity(n);
     for i in 0..n {
@@ -223,34 +219,28 @@ pub fn spectral_similarity(
 
     let alpha = params.ema_alpha;
     if alpha <= 0.0 || !alpha.is_finite() {
-        let mean = sims.iter().sum::<f64>() / n as f64;
-        return Ok(mean);
+        return Ok(sims.iter().sum::<f64>() / n as f64);
     }
-    // EMA-style recency: newest frame gets highest weight.
+
     let one_m = (1.0 - alpha).clamp(0.0, 1.0);
-    let mut weight_sum = 0.0;
     let mut score = 0.0;
+    // Paper indexing: w=1..W with w=W newest → weight α (1−α)^{0}
+    // Our index f=0..n-1 oldest→newest → exponent W−w = n−1−f
     for (f, sim) in sims.iter().enumerate() {
-        // f=0 oldest → weight α * (1-α)^{n-1}; f=n-1 newest → α
-        let age_from_end = (n - 1 - f) as i32;
-        let w = alpha * one_m.powi(age_from_end);
+        let exponent = (n - 1 - f) as i32;
+        let w = alpha * one_m.powi(exponent);
         score += w * sim;
-        weight_sum += w;
     }
-    if weight_sum > EPS {
-        Ok(score / weight_sum)
-    } else {
-        Ok(sims.iter().sum::<f64>() / n as f64)
-    }
+    Ok(score)
 }
 
-/// Distance for ranking: `1 − similarity` (lower is better).
+/// Convenience: larger similarity is better; distance = −S for min-heap style ranking.
 pub fn spectral_distance(
     query: &SpectralDescriptor,
     cand: &SpectralDescriptor,
     params: &SpecReTfParams,
 ) -> Result<f64, SpecReTfError> {
-    Ok(1.0 - spectral_similarity(query, cand, params)?)
+    Ok(-spectral_similarity(query, cand, params)?)
 }
 
 #[cfg(test)]
@@ -259,38 +249,71 @@ mod tests {
     use approx::assert_abs_diff_eq;
 
     #[test]
-    fn identical_descriptors_near_one() {
+    fn identical_self_score_matches_ema_of_two() {
+        // Identical → s_amp=1, s_phase=1, s^w=2; S = 2 Σ α(1−α)^{W−w}
         let params = SpecReTfParams::default();
         let signal: Vec<f64> = (0..63)
             .map(|i| ((i as f64) * 0.35).sin() * 0.001 + ((i as f64) * 0.1).cos() * 0.0005)
             .collect();
         let d = spectral_descriptor(&signal, &params).unwrap();
+        let w = d.frames.len();
+        assert!(w > 0);
+        let weight_sum: f64 = (0..w)
+            .map(|f| {
+                let exp = (w - 1 - f) as i32;
+                params.ema_alpha * (1.0 - params.ema_alpha).powi(exp)
+            })
+            .sum();
+        let expected = 2.0 * weight_sum;
         let sim = spectral_similarity(&d, &d, &params).unwrap();
-        assert!(sim > 0.99, "self-sim={sim}");
-        assert!(spectral_distance(&d, &d, &params).unwrap() < 0.01);
+        assert_abs_diff_eq!(sim, expected, epsilon = 1e-9);
     }
 
     #[test]
-    fn js_zero_on_same() {
+    fn js_log2_zero_on_same_and_unit_max_bound() {
         let p = vec![0.1, 0.2, 0.3, 0.4];
         assert_abs_diff_eq!(js_divergence(&p, &p), 0.0, epsilon = 1e-12);
+        // Disjoint supports → JSD → 1 with log2
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let mut aa = a.clone();
+        let mut bb = b.clone();
+        normalize_distribution(&mut aa);
+        normalize_distribution(&mut bb);
+        let js = js_divergence(&aa, &bb);
+        assert!(js > 0.9, "disjoint JS should be near 1, got {js}");
     }
 
     #[test]
-    fn phase_cosine_aligned() {
-        let p = vec![0.0, 1.0, -1.0];
-        assert_abs_diff_eq!(phase_cosine(&p, &p), 1.0, epsilon = 1e-12);
+    fn phase_is_cos_of_mean_delta_not_mean_of_cos() {
+        // Δ = [π/2, π/2] → mean=π/2 → cos=0
+        // mean(cos) would also be 0 here; use asymmetric case:
+        // Δ = [0, π] → mean=π/2 → cos(mean)=0; mean(cos)=(1 + −1)/2=0 — still same
+        // Δ = [π/3, π/3, 0] → mean=2π/9 → cos(2π/9) ≠ mean of cosines
+        let p = vec![0.0, 0.0, 0.0];
+        let q = vec![-std::f64::consts::PI / 3.0, -std::f64::consts::PI / 3.0, 0.0];
+        let paper = phase_cosine(&p, &q);
+        let mean_delta = (std::f64::consts::PI / 3.0 + std::f64::consts::PI / 3.0 + 0.0) / 3.0;
+        assert_abs_diff_eq!(paper, mean_delta.cos(), epsilon = 1e-12);
+        let mean_of_cos = ((std::f64::consts::PI / 3.0).cos()
+            + (std::f64::consts::PI / 3.0).cos()
+            + 0.0f64.cos())
+            / 3.0;
+        assert!(
+            (paper - mean_of_cos).abs() > 1e-6,
+            "paper cos(mean) must differ from mean(cos)"
+        );
     }
 
     #[test]
-    fn frame_count_50pct_overlap() {
+    fn frame_count_50pct_overlap_full_m_bins() {
         let params = SpecReTfParams::default();
-        // 63 returns, n_fft=16 hop=8 → 1 + (63-16)/8 = 6
+        // 63 samples, M=16 hop=8 → 1 + (63-16)/8 = 6
         assert_eq!(params.num_frames(63), 6);
         let signal = vec![0.001; 63];
         let d = spectral_descriptor(&signal, &params).unwrap();
         assert_eq!(d.frames.len(), 6);
-        assert_eq!(d.frames[0].amp_dist.len(), 9);
+        assert_eq!(d.frames[0].amp_dist.len(), 16); // full M, not onesided 9
     }
 
     #[test]
@@ -311,7 +334,6 @@ mod tests {
                 },
             ],
         };
-        // Normalize
         for f in &mut q.frames {
             normalize_distribution(&mut f.amp_dist);
         }
@@ -329,5 +351,17 @@ mod tests {
             s_last > s_first,
             "recent match should score higher: last={s_last} first={s_first}"
         );
+    }
+
+    #[test]
+    fn frame_score_is_sum_not_average() {
+        let a = SpectralFrame {
+            amp_dist: vec![1.0, 0.0],
+            phase: vec![0.0, 0.0],
+        };
+        let b = a.clone();
+        let s = frame_similarity(&a, &b, &SpecReTfParams::default());
+        // s_amp=1, s_phase=1 → 2
+        assert_abs_diff_eq!(s, 2.0, epsilon = 1e-12);
     }
 }

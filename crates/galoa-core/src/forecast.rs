@@ -68,10 +68,43 @@ pub fn ensemble_forecast(trajectories: &[Vec<f64>]) -> Forecast {
     }
 }
 
-/// Weighted mean + median/P10/P90 from neighbour trajectories.
+/// Softmax-weighted aggregate of neighbour futures (SpecReTF eq. 10).
 ///
-/// `weights` align with `trajectories` rows (e.g. SpecReTF similarities). Non-positive
-/// weights are clamped to a tiny epsilon so every neighbour still contributes.
+/// `scores` are raw similarities `S_k`. Weights are `exp(S_k) / Σ exp(S_i)`
+/// (numerically stabilized by subtracting `max S`). Also reports unweighted
+/// median / P10 / P90 across the same neighbours for band diagnostics.
+pub fn softmax_ensemble_forecast(trajectories: &[Vec<f64>], scores: &[f64]) -> WeightedForecast {
+    let k_used = trajectories.len().min(scores.len());
+    if k_used == 0 {
+        return WeightedForecast {
+            horizon: 0,
+            k_used: 0,
+            points: vec![],
+        };
+    }
+    let weights = softmax(&scores[..k_used]);
+    weighted_ensemble_forecast(trajectories, &weights)
+}
+
+/// Softmax with max-subtraction for stability.
+pub fn softmax(scores: &[f64]) -> Vec<f64> {
+    if scores.is_empty() {
+        return vec![];
+    }
+    let max_s = scores
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let exps: Vec<f64> = scores.iter().map(|s| (s - max_s).exp()).collect();
+    let z: f64 = exps.iter().sum();
+    if z > 0.0 && z.is_finite() {
+        exps.into_iter().map(|e| e / z).collect()
+    } else {
+        vec![1.0 / scores.len() as f64; scores.len()]
+    }
+}
+
+/// Linear weighted mean + median/P10/P90 (generic; SpecReTF uses [`softmax_ensemble_forecast`]).
 pub fn weighted_ensemble_forecast(trajectories: &[Vec<f64>], weights: &[f64]) -> WeightedForecast {
     let k_used = trajectories.len().min(weights.len());
     if k_used == 0 {
@@ -86,7 +119,7 @@ pub fn weighted_ensemble_forecast(trajectories: &[Vec<f64>], weights: &[f64]) ->
         .map(|t| t.len())
         .min()
         .unwrap_or(0);
-    let wsum: f64 = weights[..k_used].iter().map(|w| w.max(1e-12)).sum();
+    let wsum: f64 = weights[..k_used].iter().map(|w| w.max(0.0)).sum();
     let mut points = Vec::with_capacity(horizon);
     for step in 0..horizon {
         let mut vals: Vec<f64> = trajectories[..k_used].iter().map(|t| t[step]).collect();
@@ -94,7 +127,7 @@ pub fn weighted_ensemble_forecast(trajectories: &[Vec<f64>], weights: &[f64]) ->
             trajectories[..k_used]
                 .iter()
                 .zip(weights[..k_used].iter())
-                .map(|(t, w)| t[step] * w.max(1e-12))
+                .map(|(t, w)| t[step] * w.max(0.0))
                 .sum::<f64>()
                 / wsum
         } else {
@@ -157,5 +190,16 @@ mod tests {
         assert_abs_diff_eq!(f.points[0].median, 3.0, epsilon = 1e-9);
         assert!(f.points[0].p10 < f.points[0].median);
         assert!(f.points[0].p90 > f.points[0].median);
+    }
+
+    #[test]
+    fn softmax_eq10_emphasizes_high_score() {
+        let traj = vec![vec![0.0], vec![10.0]];
+        // Equal scores → mean 5
+        let eq = softmax_ensemble_forecast(&traj, &[1.0, 1.0]);
+        assert_abs_diff_eq!(eq.points[0].mean, 5.0, epsilon = 1e-9);
+        // Huge score gap → nearly second trajectory
+        let skewed = softmax_ensemble_forecast(&traj, &[0.0, 20.0]);
+        assert!(skewed.points[0].mean > 9.9, "got {}", skewed.points[0].mean);
     }
 }

@@ -17,8 +17,8 @@ mod types;
 mod znorm;
 
 pub use forecast::{
-    ensemble_forecast, weighted_ensemble_forecast, Forecast, ForecastPoint, WeightedForecast,
-    WeightedForecastPoint,
+    ensemble_forecast, softmax, softmax_ensemble_forecast, weighted_ensemble_forecast, Forecast,
+    ForecastPoint, WeightedForecast, WeightedForecastPoint,
 };
 pub use gates::{evaluate_gates, AbstainReason, GateConfig, MatchDecision};
 pub use resample::{resample_last_close, ResampleError};
@@ -26,7 +26,7 @@ pub use returns::{log_returns, ReturnsError};
 pub use specretf::{
     frame_similarity, js_divergence, phase_cosine, spectral_descriptor, spectral_distance,
     spectral_similarity, SpecReTfError, SpecReTfParams, SpectralDescriptor, SpectralFrame,
-    SPECRETF_AMP_WEIGHT, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FFT, SPECRETF_PHASE_WEIGHT,
+    SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FFT,
 };
 pub use stft::{
     stft_magnitude_features, StftError, StftParams, DEFAULT_HOP, DEFAULT_N_FFT,

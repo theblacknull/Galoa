@@ -4,8 +4,8 @@
 //! a top-K aggregate forecast (weighted mean / median / P10 / P90).
 
 use galoa_core::{
-    log_returns, spectral_descriptor, spectral_similarity, weighted_ensemble_forecast,
-    z_normalize, SpecReTfError, SpecReTfParams, SpectralDescriptor, WeightedForecast,
+    log_returns, softmax_ensemble_forecast, spectral_descriptor, spectral_similarity, z_normalize,
+    SpecReTfError, SpecReTfParams, SpectralDescriptor, WeightedForecast,
 };
 use thiserror::Error;
 
@@ -150,25 +150,22 @@ impl SpecReTfIndex {
             })
             .collect();
 
-        let (trajectories, weights) = if take == 0 {
-            // Degenerate cold-start: flat last-value forecast.
-            (
-                vec![vec![q_last; self.horizon]],
-                vec![1.0],
-            )
+        // SpecReTF eq. (10): Y_retrieval = Σ exp(S_k) Y_k / Σ exp(S_i)
+        let (trajectories, scores) = if take == 0 {
+            (vec![vec![q_last; self.horizon]], vec![0.0])
         } else {
             let mut trajs = Vec::with_capacity(take);
-            let mut ws = Vec::with_capacity(take);
+            let mut ss = Vec::with_capacity(take);
             for (sim, idx) in &scored[..take] {
                 let entry = &self.entries[*idx];
                 let shift = q_last - entry.last_close;
                 trajs.push(entry.future_abs.iter().map(|p| p + shift).collect());
-                ws.push((*sim).max(1e-12));
+                ss.push(*sim); // raw S_k — softmax applied inside ensemble
             }
-            (trajs, ws)
+            (trajs, ss)
         };
 
-        let forecast = weighted_ensemble_forecast(&trajectories, &weights);
+        let forecast = softmax_ensemble_forecast(&trajectories, &scores);
         Ok(SpecForecastResult {
             neighbors,
             forecast,
@@ -562,10 +559,13 @@ mod tests {
         let query_end = closes.len() - h;
         let result = index.forecast_at(query_end, 5).unwrap();
         assert!(!result.neighbors.is_empty());
+        // Paper eq. (8) is unnormalized: identical windows score
+        // S ≈ 2 · (1 − (1−α)^W_frames), not 1.0. For M=16 hop=8 on 31 returns,
+        // W_frames=2 → S ≈ 2·(1−0.9²)=0.38. Assert near that self-score.
+        let top = result.neighbors[0].similarity;
         assert!(
-            result.neighbors[0].similarity > 0.95,
-            "sim={}",
-            result.neighbors[0].similarity
+            (0.35..0.45).contains(&top),
+            "planted twin should near self-score ≈0.38, got {top}"
         );
         assert_eq!(result.forecast.points.len(), h);
     }
