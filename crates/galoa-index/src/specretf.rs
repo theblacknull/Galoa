@@ -326,7 +326,7 @@ pub struct SweepReport {
 }
 
 #[derive(Default)]
-struct Acc {
+pub(crate) struct Acc {
     n: usize,
     sse_close: f64,
     sae_close: f64,
@@ -340,7 +340,7 @@ struct Acc {
 }
 
 impl Acc {
-    fn finish(self, name: &str, with_band: bool) -> MethodMetrics {
+    pub(crate) fn finish(self, name: &str, with_band: bool) -> MethodMetrics {
         let n = self.n.max(1) as f64;
         MethodMetrics {
             name: name.to_string(),
@@ -566,11 +566,11 @@ pub fn run_specretf_sweep(
     })
 }
 
-fn pred_means(f: &WeightedForecast) -> Vec<f64> {
+pub(crate) fn pred_means(f: &WeightedForecast) -> Vec<f64> {
     f.points.iter().map(|p| p.mean).collect()
 }
 
-fn accumulate_pred(
+pub(crate) fn accumulate_pred(
     acc: &mut Acc,
     q_last: f64,
     actual: &[f64],

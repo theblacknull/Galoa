@@ -34,6 +34,11 @@ cargo run -p galoa --release -- forecast --scan
 # SpecReTF offline eval — ALWAYS forecasts; metrics vs naive + time-domain kNN
 cargo run -p galoa --release -- eval-specretf --data data/xauusd_m1_5d.bin
 
+# SpecReTF full-ish (eq. 11): naive | retrieval_only | direct_only | fusion_full
+cargo run -p galoa --release -- eval-specretf --fusion --data data/xauusd_m1_5d.bin
+# alias:
+cargo run -p galoa --release -- eval-specretf-full --data data/xauusd_m1_5d.bin
+
 # JSON + write metrics file
 cargo run -p galoa --release -- eval-specretf --data data/xauusd_m1_5d.bin \
   --metrics-out /tmp/specretf-metrics.json --json

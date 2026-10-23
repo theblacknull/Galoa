@@ -5,9 +5,11 @@
 //!
 //! Time-domain z-norm L2 matching is not a product path (eval baseline only).
 
+mod fusion;
 mod paper_eval;
 mod specretf;
 
+pub use fusion::{run_specretf_fusion_eval, FusionTrainConfig, RidgeMap};
 pub use paper_eval::{
     run_etth_multi_horizon, run_paper_eval, PaperEvalConfig, PaperEvalError, PaperEvalReport,
     PaperHorizonReport, PaperMethodMetrics,

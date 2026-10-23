@@ -113,8 +113,8 @@ enum Commands {
     },
     /// SpecReTF-style walk-forward eval on Gold M1 (always FIRE; no abstain).
     ///
-    /// Compares SpecReTF retrieval aggregate vs naive last-value and time-domain
-    /// z-norm L2 kNN (baseline contrast only).
+    /// Default: retrieval aggregate vs naive + td z-norm L2 kNN.
+    /// With `--fusion`: naive | retrieval_only | direct_only | fusion_full (eq. 11).
     EvalSpecretf {
         #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
         data: PathBuf,
@@ -141,7 +141,37 @@ enum Commands {
         /// Min prior library windows before first query.
         #[arg(long, default_value_t = 128)]
         min_history: usize,
+        /// Enable trained direct + Linear(Concat) fusion path (paper eq. 11 spirit).
+        #[arg(long, default_value_t = false)]
+        fusion: bool,
         /// Write machine-readable metrics JSON (optional).
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Alias for `eval-specretf --fusion` (retrieval + direct ridge + fusion ridge).
+    EvalSpecretfFull {
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_WINDOW)]
+        window: usize,
+        #[arg(long, default_value_t = DEFAULT_HORIZON)]
+        horizon: usize,
+        #[arg(long, default_value_t = SPECRETF_K)]
+        k: usize,
+        #[arg(long, default_value_t = SPECRETF_N_FFT)]
+        n_fft: usize,
+        #[arg(long, default_value_t = SPECRETF_HOP)]
+        hop: usize,
+        #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
+        ema_alpha: f64,
+        #[arg(long, default_value = "raw_close")]
+        signal: String,
+        #[arg(long, default_value_t = 1)]
+        stride: usize,
+        #[arg(long, default_value_t = 128)]
+        min_history: usize,
         #[arg(long)]
         metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -401,6 +431,7 @@ async fn main() -> Result<()> {
             signal,
             stride,
             min_history,
+            fusion,
             metrics_out,
             json,
         } => {
@@ -417,6 +448,44 @@ async fn main() -> Result<()> {
                 signal,
                 stride,
                 min_history,
+                fusion,
+                metrics_out,
+            };
+            let report = eval_specretf::run_eval(&opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                eval_specretf::print_report(&report, &data);
+            }
+        }
+        Commands::EvalSpecretfFull {
+            data,
+            window,
+            horizon,
+            k,
+            n_fft,
+            hop,
+            ema_alpha,
+            signal,
+            stride,
+            min_history,
+            metrics_out,
+            json,
+        } => {
+            let signal = SignalMode::parse(&signal)
+                .ok_or_else(|| anyhow::anyhow!("unknown --signal {signal} (use log_returns|raw_close)"))?;
+            let opts = eval_specretf::EvalOpts {
+                data: data.clone(),
+                window,
+                horizon,
+                k,
+                n_fft,
+                hop,
+                ema_alpha,
+                signal,
+                stride,
+                min_history,
+                fusion: true,
                 metrics_out,
             };
             let report = eval_specretf::run_eval(&opts)?;

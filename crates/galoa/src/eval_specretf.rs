@@ -5,7 +5,8 @@ use galoa_core::{
     SpecReTfParams, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_K, SPECRETF_N_FFT,
 };
 use galoa_index::{
-    run_specretf_eval, run_specretf_sweep, EvalConfig, EvalReport, SignalMode, SweepReport,
+    run_specretf_eval, run_specretf_fusion_eval, run_specretf_sweep, EvalConfig, EvalReport,
+    FusionTrainConfig, SignalMode, SweepReport,
 };
 use galoa_ingest::{load_series, DEFAULT_GOLD_SERIES};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,8 @@ pub struct EvalOpts {
     pub signal: SignalMode,
     pub stride: usize,
     pub min_history: usize,
+    /// If true: naive | retrieval_only | direct_only | fusion_full (eq. 11 spirit).
+    pub fusion: bool,
     pub metrics_out: Option<PathBuf>,
 }
 
@@ -38,6 +41,7 @@ impl Default for EvalOpts {
             signal: SignalMode::RawClose,
             stride: 1,
             min_history: 128,
+            fusion: false,
             metrics_out: None,
         }
     }
@@ -63,7 +67,11 @@ pub fn run_eval(opts: &EvalOpts) -> Result<EvalReport> {
             ..Default::default()
         },
     };
-    let report = run_specretf_eval(&closes, &cfg)?;
+    let report = if opts.fusion {
+        run_specretf_fusion_eval(&closes, &cfg, &FusionTrainConfig::default())?
+    } else {
+        run_specretf_eval(&closes, &cfg)?
+    };
     if let Some(ref out) = opts.metrics_out {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
@@ -133,7 +141,12 @@ pub fn run_sweep(opts: &SweepOpts) -> Result<SweepReport> {
 }
 
 pub fn print_report(r: &EvalReport, data: &Path) {
-    println!("Galoa SpecReTF offline eval (always FIRE)");
+    let mode = if r.methods.iter().any(|m| m.name == "fusion_full") {
+        "fusion (eq.11 spirit: retrieval + direct ridge + Linear concat)"
+    } else {
+        "retrieval-only (eq.10)"
+    };
+    println!("Galoa SpecReTF offline eval (always FIRE) — {mode}");
     println!(
         "data={}  bars={}  W={} H={} K={}  stride={}  STFT n_fft={} hop={}  ema_α={}  signal={}",
         data.display(),
