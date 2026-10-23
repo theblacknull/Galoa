@@ -58,6 +58,14 @@ cargo run -p galoa --release -- eval-raft --data data/xauusd_m1_5d.bin
 cargo run -p galoa --release -- eval-raft --head ridge --no-specretf \
   --metrics-out /tmp/raft-metrics.json --json
 
+# Paper-faithful RAFT (official linear f/g/h + train/val/test; PyTorch)
+# See scripts/raft_paper/README.md — ETTh1 App. B and Gold adapted L/F
+bash scripts/download_paper_datasets.sh
+python3 scripts/raft_paper/run_raft_faithful.py --dataset etth1 \
+  --data data/ETT/ETTh1.csv --seq-len 720 --pred-len 96 --topm 20 --lr 1e-3
+python3 scripts/raft_paper/run_raft_faithful.py --dataset gold \
+  --data data/xauusd_m1_5d.bin --seq-len 96 --pred-len 16 --topm 10 --lr 1e-3
+
 # Dev-only synthetic / HTTP
 cargo run -p galoa -- forecast --synthetic --json
 cargo run -p galoa -- serve --port 3000
@@ -105,6 +113,15 @@ M1 close bid → sliding L patches (keys) + F futures (values)
   → always FIRE; metrics vs SpecReTF / naive / td_znorm_l2
 ```
 
+**RAFT paper-faithful (scripts/raft_paper/, official arch):**
+
+```
+train/val/test split → StandardScaler(train) → retrieval library = train only
+  → multi-period MG (unfold/mean/repeat) + Pearson + top-m + softmax(τ=0.1)
+  → train linear f:L→F, g^(p):F/p→F, h:2F→F (Adam MSE)
+  → test MSE/MAE scaled (+ raw inverse for Gold)
+```
+
 ## Refresh Gold from MT5
 
 **Close convention:** MT5 chart / `copy_rates` **close** is **bid-based**.
@@ -128,13 +145,14 @@ crates/
   galoa-ingest/    # GALOAP1 .bin + CSV
   galoa-ctrader/   # stub
   galoa/           # CLI: forecast | eval-specretf | eval-raft | eval-paper-specretf | serve
+scripts/raft_paper/  # paper-faithful PyTorch port (official f/g/h + ETT/Gold)
 configs/default.toml
 data/xauusd_m1_5d.bin
 ```
 
 ## Deferred
 
-- Full PyTorch-style RAFT SGD head on long history (5d uses identity/ridge stand-in)
+- Longer Gold history for paper-scale L/F (5d: MLP ≈ naive; see paper-faithful results)
 - SpecReTF neural fusion (TimesNet / linear head) — out of scope for MVP retrieval core
 - Mel-filterbank; HNSW; live cTrader WS; Parquet; trading/execution
 - Phase-2 abstain on SpecReTF path (reuse gated `d_max` / `N_min` / `σ_max`)

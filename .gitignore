@@ -1,11 +1,13 @@
-/target/
-**/*.rs.bk
+/data/ETT/*.csv
+.DS_Store
 .env
 .env.*
 !.env.example
-*.pem
-.DS_Store
 .idea/
-.vscode/
 # Large paper benchmark CSVs — download via scripts/download_paper_datasets.sh
-/data/ETT/*.csv
+*.pem
+*.pyc
+__pycache__/
+**/*.rs.bk
+/target/
+.vscode/
