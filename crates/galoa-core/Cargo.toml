@@ -3,11 +3,12 @@ name = "galoa-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core types, resampling, z-normalization, and forecast ensemble for Galoa"
+description = "Core types, log-returns, STFT features, gates, and forecast ensemble for Galoa"
 
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+rustfft = { workspace = true }
 
 [dev-dependencies]
 approx = "0.5"

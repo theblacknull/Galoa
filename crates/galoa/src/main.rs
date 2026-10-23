@@ -1,17 +1,22 @@
-//! Galoa offline MVP: Gold (XAUUSD) M1 bid-close replay → similarity forecast.
+//! Galoa offline MVP: Gold (XAUUSD) M1 bid-close → spectral STFT match → gated forecast.
 
 mod api;
 mod pipeline;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use galoa_core::{DEFAULT_HOP, DEFAULT_N_FFT};
 use galoa_index::{DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
 use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig, DEFAULT_GOLD_SERIES};
+use pipeline::ForecastOpts;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
-#[command(name = "galoa", about = "Galoa — similar-segment price forecast (offline Gold MVP)")]
+#[command(
+    name = "galoa",
+    about = "Galoa — spectral similar-segment price forecast (offline Gold MVP)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -29,7 +34,7 @@ enum Commands {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
-    /// Run forecast on real MT5 Gold M1 (default) or optional synthetic.
+    /// Run spectral forecast on real MT5 Gold M1 (default) or optional synthetic.
     Forecast {
         /// Path to `.bin` (GALOAP1) or `ts_ns,close` CSV. Default: real 5d M1 bin.
         #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
@@ -46,6 +51,24 @@ enum Commands {
         /// Resample Δt in seconds (0 = no resample, use series as-is)
         #[arg(long, default_value_t = 0)]
         dt_secs: i64,
+        /// STFT FFT size (Hann-windowed frames on log-returns)
+        #[arg(long, default_value_t = DEFAULT_N_FFT)]
+        n_fft: usize,
+        /// STFT hop length
+        #[arg(long, default_value_t = DEFAULT_HOP)]
+        hop: usize,
+        /// Max L2 feature distance for a neighbour to count as support
+        #[arg(long, default_value_t = 0.48)]
+        d_max: f64,
+        /// Min neighbours within d_max to FIRE
+        #[arg(long, default_value_t = 3)]
+        n_min: usize,
+        /// Max std of H-step log-returns across support (outcome dispersion)
+        #[arg(long, default_value_t = 0.0025)]
+        sigma_max: f64,
+        /// Walk the series and report FIRE/ABSTAIN coverage instead of one query
+        #[arg(long, default_value_t = false)]
+        scan: bool,
         /// Pretty-print JSON to stdout
         #[arg(long, default_value_t = false)]
         json: bool,
@@ -64,9 +87,43 @@ enum Commands {
         k: usize,
         #[arg(long, default_value_t = 0)]
         dt_secs: i64,
+        #[arg(long, default_value_t = DEFAULT_N_FFT)]
+        n_fft: usize,
+        #[arg(long, default_value_t = DEFAULT_HOP)]
+        hop: usize,
+        #[arg(long, default_value_t = 0.48)]
+        d_max: f64,
+        #[arg(long, default_value_t = 3)]
+        n_min: usize,
+        #[arg(long, default_value_t = 0.0025)]
+        sigma_max: f64,
         #[arg(long, default_value_t = 3000)]
         port: u16,
     },
+}
+
+fn opts_from(
+    window: usize,
+    horizon: usize,
+    k: usize,
+    dt_secs: i64,
+    n_fft: usize,
+    hop: usize,
+    d_max: f64,
+    n_min: usize,
+    sigma_max: f64,
+) -> ForecastOpts {
+    ForecastOpts {
+        window,
+        horizon,
+        k,
+        dt_secs,
+        n_fft,
+        hop,
+        d_max,
+        n_min,
+        sigma_max,
+    }
 }
 
 #[tokio::main]
@@ -102,20 +159,31 @@ async fn main() -> Result<()> {
             horizon,
             k,
             dt_secs,
+            n_fft,
+            hop,
+            d_max,
+            n_min,
+            sigma_max,
+            scan,
             json,
         } => {
-            let result = pipeline::run_forecast(
-                Some(data),
-                synthetic,
-                window,
-                horizon,
-                k,
-                dt_secs,
-            )?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+            let opts = opts_from(
+                window, horizon, k, dt_secs, n_fft, hop, d_max, n_min, sigma_max,
+            );
+            if scan {
+                let cov = pipeline::run_scan(Some(data), synthetic, &opts)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&cov)?);
+                } else {
+                    pipeline::print_coverage(&cov);
+                }
             } else {
-                pipeline::print_human(&result);
+                let result = pipeline::run_forecast(Some(data), synthetic, &opts)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    pipeline::print_human(&result);
+                }
             }
         }
         Commands::Serve {
@@ -125,9 +193,17 @@ async fn main() -> Result<()> {
             horizon,
             k,
             dt_secs,
+            n_fft,
+            hop,
+            d_max,
+            n_min,
+            sigma_max,
             port,
         } => {
-            api::serve(Some(data), synthetic, window, horizon, k, dt_secs, port).await?;
+            let opts = opts_from(
+                window, horizon, k, dt_secs, n_fft, hop, d_max, n_min, sigma_max,
+            );
+            api::serve(Some(data), synthetic, opts, port).await?;
         }
     }
     Ok(())

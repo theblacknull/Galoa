@@ -1,4 +1,4 @@
-use crate::pipeline::{run_forecast, ForecastJson};
+use crate::pipeline::{run_forecast, ForecastJson, ForecastOpts};
 use anyhow::Result;
 use axum::extract::State;
 use axum::routing::{get, post};
@@ -12,10 +12,7 @@ use std::sync::Arc;
 struct AppState {
     data: Option<PathBuf>,
     synthetic: bool,
-    window: usize,
-    horizon: usize,
-    k: usize,
-    dt_secs: i64,
+    opts: ForecastOpts,
 }
 
 #[derive(Deserialize, Default)]
@@ -24,24 +21,23 @@ pub struct ForecastRequest {
     pub horizon: Option<usize>,
     pub k: Option<usize>,
     pub dt_secs: Option<i64>,
+    pub n_fft: Option<usize>,
+    pub hop: Option<usize>,
+    pub d_max: Option<f64>,
+    pub n_min: Option<usize>,
+    pub sigma_max: Option<f64>,
 }
 
 pub async fn serve(
     data: Option<PathBuf>,
     synthetic: bool,
-    window: usize,
-    horizon: usize,
-    k: usize,
-    dt_secs: i64,
+    opts: ForecastOpts,
     port: u16,
 ) -> Result<()> {
     let state = Arc::new(AppState {
         data,
         synthetic,
-        window,
-        horizon,
-        k,
-        dt_secs,
+        opts,
     });
 
     let app = Router::new()
@@ -61,19 +57,36 @@ async fn forecast_handler(
     body: Option<Json<ForecastRequest>>,
 ) -> Result<Json<ForecastJson>, (axum::http::StatusCode, String)> {
     let req = body.map(|j| j.0).unwrap_or_default();
-    let window = req.window.unwrap_or(state.window).max(1);
-    let horizon = req.horizon.unwrap_or(state.horizon).max(1);
-    let k = req.k.unwrap_or(state.k).max(1);
-    let dt_secs = req.dt_secs.unwrap_or(state.dt_secs);
+    let mut opts = state.opts.clone();
+    if let Some(v) = req.window {
+        opts.window = v.max(1);
+    }
+    if let Some(v) = req.horizon {
+        opts.horizon = v.max(1);
+    }
+    if let Some(v) = req.k {
+        opts.k = v.max(1);
+    }
+    if let Some(v) = req.dt_secs {
+        opts.dt_secs = v;
+    }
+    if let Some(v) = req.n_fft {
+        opts.n_fft = v.max(1);
+    }
+    if let Some(v) = req.hop {
+        opts.hop = v.max(1);
+    }
+    if let Some(v) = req.d_max {
+        opts.d_max = v;
+    }
+    if let Some(v) = req.n_min {
+        opts.n_min = v.max(1);
+    }
+    if let Some(v) = req.sigma_max {
+        opts.sigma_max = v;
+    }
 
-    run_forecast(
-        state.data.clone(),
-        state.synthetic,
-        window,
-        horizon,
-        k,
-        dt_secs,
-    )
-    .map(Json)
-    .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))
+    run_forecast(state.data.clone(), state.synthetic, &opts)
+        .map(Json)
+        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))
 }

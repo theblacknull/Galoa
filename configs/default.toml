@@ -1,4 +1,5 @@
 # Galoa offline MVP defaults — no secrets.
+# Matching path: spectral STFT only (no time-domain z-norm L2).
 symbol = "XAUUSD"
 # Canonical offline series (MT5 M1 bid bar close, ~5 calendar days).
 data = "data/xauusd_m1_5d.bin"
@@ -7,6 +8,17 @@ dt_secs = 0
 window = 64
 horizon = 16
 k = 10
+
+# STFT on log-returns of the W-close window (Hann, onesided mag → F, L2-normed).
+# W=64 closes → 63 returns; n_fft=16 hop=4 → 12 frames × 9 bins = 108-D features.
+n_fft = 16
+hop = 4
+
+# Selective FIRE gates (abstain by default).
+d_max = 0.48
+n_min = 3
+sigma_max = 0.0025
+
 # MT5 chart close is bid-based; keep that for offline. Live cTrader: mid | bid | ask
 quote_field = "bid"
 timeframe = "M1"

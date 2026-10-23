@@ -1,3 +1,6 @@
+//! Demoted utility — **not** used by the spectral matching path.
+//! Kept for experiments / legacy helpers only.
+
 use thiserror::Error;
 
 /// Mean and std used to z-normalize a window (needed to lift forecasts back).
