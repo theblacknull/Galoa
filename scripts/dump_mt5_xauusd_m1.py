@@ -99,11 +99,19 @@ def write_outputs(
     )
 
 
-def _filter_days(rows: list[tuple[int, float]], days: int) -> list[tuple[int, float]]:
+def _filter_window(
+    rows: list[tuple[int, float]],
+    days: int,
+    end_before: int | None,
+) -> list[tuple[int, float]]:
+    """Keep bars in [end - days*86400, end). end = end_before or last bar time+1."""
     rows = sorted(rows, key=lambda x: x[0])
-    end = rows[-1][0]
+    if not rows:
+        return rows
+    end = end_before if end_before is not None else rows[-1][0] + 1
     start = end - days * 86400
-    return [(t, c) for t, c in rows if t >= start] or rows
+    out = [(t, c) for t, c in rows if start <= t < end]
+    return out
 
 
 def dump_native(
@@ -117,6 +125,7 @@ def dump_native(
     *,
     attach: bool,
     write_csv: bool,
+    end_before: int | None,
 ) -> None:
     import MetaTrader5 as mt5  # type: ignore
 
@@ -138,7 +147,14 @@ def dump_native(
         if rates is None or len(rates) == 0:
             print("no rates:", mt5.last_error(), file=sys.stderr)
             sys.exit(4)
-        rows = _filter_days([(int(r["time"]), float(r["close"])) for r in rates], days)
+        rows = _filter_window(
+            [(int(r["time"]), float(r["close"])) for r in rates],
+            days,
+            end_before,
+        )
+        if not rows:
+            print("no bars in requested window", file=sys.stderr)
+            sys.exit(5)
         write_outputs(rows, symbol, server, stem, write_csv=write_csv)
     finally:
         mt5.shutdown()
@@ -155,6 +171,7 @@ def dump_mt5linux(
     port: int,
     *,
     write_csv: bool,
+    end_before: int | None,
 ) -> None:
     import rpyc
 
@@ -176,16 +193,20 @@ def dump_mt5linux(
         if not n:
             print("no rates:", conn.eval("mt5.last_error()"), file=sys.stderr)
             sys.exit(4)
+        end_expr = str(end_before) if end_before is not None else "rows[-1][0]+1"
         conn.execute(
             f"""
 rows=[(int(r["time"]), float(r["close"])) for r in rates]
 rows.sort(key=lambda x: x[0])
-end=rows[-1][0]
+end={end_expr}
 start=end-{days}*86400
-day=[(t,c) for t,c in rows if t>=start] or rows
+day=[(t,c) for t,c in rows if start<=t<end]
 """
         )
         n = conn.eval("len(day)")
+        if not n:
+            print("no bars in requested window", file=sys.stderr)
+            sys.exit(5)
         rows: list[tuple[int, float]] = []
         for i in range(0, n, 500):
             part = conn.eval(f"day[{i}:{i + 500}]")
@@ -204,7 +225,7 @@ day=[(t,c) for t,c in rows if t>=start] or rows
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--days", type=int, default=5, help="calendar days ending at last bar")
+    p.add_argument("--days", type=int, default=5, help="calendar days in the window")
     p.add_argument("--count", type=int, default=8000, help="M1 bars to request from MT5")
     p.add_argument("--stem", default=None, help="output stem under data/ (default xauusd_m1_{days}d)")
     p.add_argument("--native", action="store_true", help="use Windows MetaTrader5 package")
@@ -212,6 +233,11 @@ def main() -> None:
         "--attach",
         action="store_true",
         help="with --native: attach to already-logged-in terminal (no password)",
+    )
+    p.add_argument(
+        "--end-before-utc",
+        default=None,
+        help="ISO UTC exclusive end of window (default: after last fetched bar)",
     )
     p.add_argument("--csv", action="store_true", help="also write debug CSV (off by default)")
     p.add_argument("--rpyc-port", type=int, default=18812, help="mt5linux RPyC port")
@@ -221,6 +247,13 @@ def main() -> None:
     if args.attach and not args.native:
         print("--attach requires --native", file=sys.stderr)
         sys.exit(1)
+
+    end_before: int | None = None
+    if args.end_before_utc:
+        dt = datetime.fromisoformat(args.end_before_utc.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        end_before = int(dt.timestamp())
 
     load_dotenv(args.env)
     server = os.environ.get("MT5_SERVER")
@@ -241,7 +274,8 @@ def main() -> None:
 
     stem = args.stem or f"xauusd_m1_{args.days}d"
     who = f"attach server={server}" if args.attach else f"login={login} server={server}"
-    print(f"dump {who} symbol={symbol} days={args.days} (password redacted)")
+    end_note = f" end_before={args.end_before_utc}" if args.end_before_utc else ""
+    print(f"dump {who} symbol={symbol} days={args.days}{end_note} (password redacted)")
 
     if args.native:
         dump_native(
@@ -254,6 +288,7 @@ def main() -> None:
             stem,
             attach=args.attach,
             write_csv=args.csv,
+            end_before=end_before,
         )
     else:
         assert login is not None and password is not None
@@ -267,6 +302,7 @@ def main() -> None:
             stem,
             args.rpyc_port,
             write_csv=args.csv,
+            end_before=end_before,
         )
 
 

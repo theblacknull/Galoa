@@ -1,0 +1,42 @@
+{
+  "architecture": "fit -> cumsum contribution signal group -> L/K forecast H=1",
+  "best": {
+    "dir_acc": 0.4894042383046781,
+    "elapsed_sec": 0.2700825,
+    "energy_pct": 90.0,
+    "error": null,
+    "forecast": "L",
+    "l": 16,
+    "max_dd_pct": 5.724815358940137,
+    "mean_n_comp": 12.41941902109033,
+    "n": 5026,
+    "pnl_over_maxdd": -0.4494254584930548,
+    "pnl_pct": -2.572877767479753,
+    "win": 64
+  },
+  "data": "data/xauusd_m1_prior15d.bin",
+  "locked_config": true,
+  "metrics_only": [
+    "dir_acc",
+    "pnl_pct",
+    "pnl_over_maxdd"
+  ],
+  "rows": [
+    {
+      "dir_acc": 0.4894042383046781,
+      "elapsed_sec": 0.2700825,
+      "energy_pct": 90.0,
+      "error": null,
+      "forecast": "L",
+      "l": 16,
+      "max_dd_pct": 5.724815358940137,
+      "mean_n_comp": 12.41941902109033,
+      "n": 5026,
+      "pnl_over_maxdd": -0.4494254584930548,
+      "pnl_pct": -2.572877767479753,
+      "win": 64
+    }
+  ],
+  "runtime": "rust+ssa_rs",
+  "wall_sec": 0.2779848
+}

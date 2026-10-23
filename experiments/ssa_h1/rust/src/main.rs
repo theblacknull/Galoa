@@ -245,9 +245,21 @@ fn run_cfg(closes: &[f64], rets: &[f64], cfg: &Cfg) -> Row {
     }
 }
 
-fn parse_args() -> Result<(PathBuf, PathBuf), String> {
+struct Args {
+    data: PathBuf,
+    out: PathBuf,
+    /// If set, run only this config (locked OOS); else default grid.
+    locked: Option<Cfg>,
+}
+
+fn parse_args() -> Result<Args, String> {
     let mut data = PathBuf::from("data/xauusd_m1_prior5d_b.bin");
     let mut out = PathBuf::from("experiments/ssa_h1/ssa_prior5d_b_rust.json");
+    let mut forecast: Option<ForecastMode> = None;
+    let mut win: Option<usize> = None;
+    let mut l: Option<usize> = None;
+    let mut energy: Option<f64> = None;
+    let mut stride: usize = 3;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -262,18 +274,89 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
                 let v = args.get(i).ok_or("--out needs a path")?;
                 out = PathBuf::from(v);
             }
+            "--forecast" => {
+                i += 1;
+                let v = args.get(i).ok_or("--forecast needs L or K")?;
+                forecast = Some(match v.as_str() {
+                    "L" | "l" => ForecastMode::L,
+                    "K" | "k" => ForecastMode::K,
+                    other => return Err(format!("--forecast must be L or K, got {other}")),
+                });
+            }
+            "--win" => {
+                i += 1;
+                let v = args.get(i).ok_or("--win needs an int")?;
+                win = Some(v.parse().map_err(|_| "--win must be int")?);
+            }
+            "--l" | "--L" => {
+                i += 1;
+                let v = args.get(i).ok_or("--l needs an int")?;
+                l = Some(v.parse().map_err(|_| "--l must be int")?);
+            }
+            "--energy" => {
+                i += 1;
+                let v = args.get(i).ok_or("--energy needs a float")?;
+                energy = Some(v.parse().map_err(|_| "--energy must be float")?);
+            }
+            "--stride" => {
+                i += 1;
+                let v = args.get(i).ok_or("--stride needs an int")?;
+                stride = v.parse().map_err(|_| "--stride must be int")?;
+            }
             other => return Err(format!("unknown arg {other}")),
         }
         i += 1;
     }
-    Ok((data, out))
+
+    let locked = match (forecast, win, l, energy) {
+        (None, None, None, None) => None,
+        (Some(mode), Some(win), Some(l), Some(energy_pct)) => Some(Cfg {
+            win,
+            l,
+            energy_pct,
+            mode,
+            stride,
+        }),
+        _ => {
+            return Err(
+                "locked run needs all of --forecast --win --l --energy (or omit all for grid)"
+                    .into(),
+            )
+        }
+    };
+
+    Ok(Args { data, out, locked })
+}
+
+fn default_grid(stride: usize) -> Vec<Cfg> {
+    [
+        (64usize, 16usize, 80.0, ForecastMode::L),
+        (64, 16, 90.0, ForecastMode::L),
+        (96, 24, 85.0, ForecastMode::L),
+        (96, 32, 85.0, ForecastMode::L),
+        (96, 32, 85.0, ForecastMode::K),
+        (128, 32, 85.0, ForecastMode::L),
+        (128, 40, 90.0, ForecastMode::L),
+        (128, 40, 85.0, ForecastMode::K),
+    ]
+    .into_iter()
+    .map(|(win, l, energy_pct, mode)| Cfg {
+        win,
+        l,
+        energy_pct,
+        mode,
+        stride,
+    })
+    .collect()
 }
 
 fn main() {
-    let (data, out) = parse_args().unwrap_or_else(|e| {
+    let args = parse_args().unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2);
     });
+    let data = args.data;
+    let out = args.out;
 
     let wall0 = Instant::now();
     let closes = load_galoa_closes(&data).unwrap_or_else(|e| {
@@ -292,25 +375,23 @@ fn main() {
         data.display()
     );
 
-    let grid: Vec<Cfg> = [
-        (64usize, 16usize, 80.0, ForecastMode::L),
-        (64, 16, 90.0, ForecastMode::L),
-        (96, 24, 85.0, ForecastMode::L),
-        (96, 32, 85.0, ForecastMode::L),
-        (96, 32, 85.0, ForecastMode::K),
-        (128, 32, 85.0, ForecastMode::L),
-        (128, 40, 90.0, ForecastMode::L),
-        (128, 40, 85.0, ForecastMode::K),
-    ]
-    .into_iter()
-    .map(|(win, l, energy_pct, mode)| Cfg {
-        win,
-        l,
-        energy_pct,
-        mode,
-        stride: 3,
-    })
-    .collect();
+    let grid: Vec<Cfg> = match args.locked {
+        Some(cfg) => {
+            println!(
+                "LOCKED fc={} win={} L={} E={:.0}% stride={}",
+                match cfg.mode {
+                    ForecastMode::L => "L",
+                    ForecastMode::K => "K",
+                },
+                cfg.win,
+                cfg.l,
+                cfg.energy_pct,
+                cfg.stride
+            );
+            vec![cfg]
+        }
+        None => default_grid(3),
+    };
 
     let rows: Vec<Row> = grid
         .par_iter()
@@ -358,10 +439,12 @@ fn main() {
         );
     }
 
+    let locked = rows.len() == 1;
     let payload = serde_json::json!({
         "runtime": "rust+ssa_rs",
         "architecture": "fit -> cumsum contribution signal group -> L/K forecast H=1",
         "data": data.to_string_lossy(),
+        "locked_config": locked,
         "metrics_only": ["dir_acc", "pnl_pct", "pnl_over_maxdd"],
         "rows": rows,
         "best": best,
