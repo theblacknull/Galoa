@@ -1,9 +1,12 @@
 # Galoa offline MVP defaults — no secrets.
 symbol = "XAUUSD"
+# Canonical offline series (MT5 M1 bid bar close, ~5 calendar days).
+data = "data/xauusd_m1_5d.bin"
 # Resample last-close Δt in seconds; 0 = use series as-is.
 dt_secs = 0
 window = 64
 horizon = 16
 k = 10
-# Spot quote policy when live cTrader lands: mid | bid | ask
-quote_field = "mid"
+# MT5 chart close is bid-based; keep that for offline. Live cTrader: mid | bid | ask
+quote_field = "bid"
+timeframe = "M1"

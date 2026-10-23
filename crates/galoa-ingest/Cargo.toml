@@ -3,7 +3,7 @@ name = "galoa-ingest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CSV / synthetic Gold replay ingest for Galoa MVP"
+description = "Binary/CSV Gold replay ingest (+ optional synthetic) for Galoa MVP"
 
 [dependencies]
 galoa-core = { workspace = true }

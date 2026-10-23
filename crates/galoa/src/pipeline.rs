@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use galoa_core::{resample_last_close, XAUUSD};
 use galoa_index::{ForecastResult, WindowIndex};
-use galoa_ingest::{generate_gold_series, load_csv, SyntheticConfig};
+use galoa_ingest::{generate_gold_series, load_series, SyntheticConfig, DEFAULT_GOLD_SERIES};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -39,14 +39,14 @@ pub fn run_forecast(
     k: usize,
     dt_secs: i64,
 ) -> Result<ForecastJson> {
-    let mut events = if synthetic || data.is_none() {
+    let mut events = if synthetic {
         if let Some(ref p) = data {
             tracing::warn!("--synthetic set; ignoring --data {}", p.display());
         }
         generate_gold_series(&SyntheticConfig::default())
     } else {
-        let path = data.expect("checked");
-        load_csv(&path).with_context(|| format!("load {}", path.display()))?
+        let path = data.unwrap_or_else(|| PathBuf::from(DEFAULT_GOLD_SERIES));
+        load_series(&path).with_context(|| format!("load {}", path.display()))?
     };
 
     if dt_secs > 0 {

@@ -1,4 +1,4 @@
-//! Galoa offline MVP: Gold (XAUUSD) replay → similarity forecast.
+//! Galoa offline MVP: Gold (XAUUSD) M1 bid-close replay → similarity forecast.
 
 mod api;
 mod pipeline;
@@ -6,7 +6,7 @@ mod pipeline;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use galoa_index::{DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
-use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig};
+use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig, DEFAULT_GOLD_SERIES};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -19,7 +19,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Generate synthetic XAUUSD close CSV (random-walk + planted analogues).
+    /// Generate synthetic XAUUSD close CSV (dev only; not the primary series).
     Generate {
         /// Output CSV path
         #[arg(long, default_value = "data/xauusd_synthetic.csv")]
@@ -29,12 +29,12 @@ enum Commands {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
-    /// Run forecast on a CSV replay (or generate-in-memory if --data omitted with --synthetic).
+    /// Run forecast on real MT5 Gold M1 (default) or optional synthetic.
     Forecast {
-        /// Path to `ts_ns,close` CSV
-        #[arg(long)]
-        data: Option<PathBuf>,
-        /// Use in-memory synthetic Gold instead of a file
+        /// Path to `.bin` (GALOAP1) or `ts_ns,close` CSV. Default: real 5d M1 bin.
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
+        /// Use in-memory synthetic Gold instead of a file (dev only)
         #[arg(long, default_value_t = false)]
         synthetic: bool,
         #[arg(long, default_value_t = DEFAULT_WINDOW)]
@@ -52,8 +52,8 @@ enum Commands {
     },
     /// Serve `POST /forecast` (and `GET /health`) over axum.
     Serve {
-        #[arg(long)]
-        data: Option<PathBuf>,
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
         #[arg(long, default_value_t = false)]
         synthetic: bool,
         #[arg(long, default_value_t = DEFAULT_WINDOW)]
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
             let events = generate_gold_series(&cfg);
             write_csv(&out, &events).with_context(|| format!("write {}", out.display()))?;
             println!(
-                "Wrote {} XAUUSD bars to {} (seed={})",
+                "Wrote {} synthetic XAUUSD bars to {} (seed={}) — dev only",
                 events.len(),
                 out.display(),
                 seed
@@ -104,7 +104,14 @@ async fn main() -> Result<()> {
             dt_secs,
             json,
         } => {
-            let result = pipeline::run_forecast(data, synthetic, window, horizon, k, dt_secs)?;
+            let result = pipeline::run_forecast(
+                Some(data),
+                synthetic,
+                window,
+                horizon,
+                k,
+                dt_secs,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
@@ -120,7 +127,7 @@ async fn main() -> Result<()> {
             dt_secs,
             port,
         } => {
-            api::serve(data, synthetic, window, horizon, k, dt_secs, port).await?;
+            api::serve(Some(data), synthetic, window, horizon, k, dt_secs, port).await?;
         }
     }
     Ok(())

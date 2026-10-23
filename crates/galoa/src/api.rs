@@ -35,7 +35,6 @@ pub async fn serve(
     dt_secs: i64,
     port: u16,
 ) -> Result<()> {
-    let synthetic = synthetic || data.is_none();
     let state = Arc::new(AppState {
         data,
         synthetic,
