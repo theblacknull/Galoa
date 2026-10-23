@@ -1,8 +1,9 @@
 //! Galoa offline MVP: Gold (XAUUSD) M1 bid-close → spectral STFT match → gated forecast.
-//! Also: SpecReTF-style always-FIRE offline eval (`eval-specretf`).
+//! Also: SpecReTF (`eval-specretf`) and RAFT (`eval-raft`) always-FIRE offline evals.
 
 mod api;
 mod eval_paper;
+mod eval_raft;
 mod eval_specretf;
 mod pipeline;
 
@@ -13,6 +14,7 @@ use galoa_core::{
 };
 use galoa_index::{DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
 use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig, DEFAULT_GOLD_SERIES};
+use galoa_raft::{DEFAULT_LOOKBACK, DEFAULT_TAU, DEFAULT_TOP_M};
 use pipeline::ForecastOpts;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -136,6 +138,44 @@ enum Commands {
         #[arg(long, default_value_t = 128)]
         min_history: usize,
         /// Write machine-readable metrics JSON (optional).
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// RAFT walk-forward eval on Gold M1 (arXiv:2505.04163; always FIRE).
+    ///
+    /// Time-domain Pearson retrieval + multi-period `{1,2,4}` + identity/ridge head.
+    /// Side-by-side SpecReTF on the same L/F/m protocol unless `--no-specretf`.
+    EvalRaft {
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
+        /// Lookback L (paper often 96–720; default 64 matches SpecReTF W on short 5d).
+        #[arg(long, default_value_t = DEFAULT_LOOKBACK)]
+        lookback: usize,
+        #[arg(long, default_value_t = DEFAULT_HORIZON)]
+        horizon: usize,
+        /// Top-m neighbours (paper grid {1,5,10,20}).
+        #[arg(long, default_value_t = DEFAULT_TOP_M)]
+        top_m: usize,
+        #[arg(long, default_value_t = DEFAULT_TAU)]
+        tau: f64,
+        /// Comma-separated periods (paper `{1,2,4}`).
+        #[arg(long, default_value = "1,2,4")]
+        periods: String,
+        /// `pearson` (paper default) or `euclidean` (neg L2).
+        #[arg(long, default_value = "pearson")]
+        similarity: String,
+        /// `identity` = retrieval+offset only; `ridge` = expanding linear stand-in.
+        #[arg(long, default_value = "identity")]
+        head: String,
+        #[arg(long, default_value_t = 1)]
+        stride: usize,
+        #[arg(long, default_value_t = 128)]
+        min_history: usize,
+        /// Skip SpecReTF side-by-side (faster).
+        #[arg(long, default_value_t = false)]
+        no_specretf: bool,
         #[arg(long)]
         metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -323,6 +363,42 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 eval_specretf::print_report(&report, &data);
+            }
+        }
+        Commands::EvalRaft {
+            data,
+            lookback,
+            horizon,
+            top_m,
+            tau,
+            periods,
+            similarity,
+            head,
+            stride,
+            min_history,
+            no_specretf,
+            metrics_out,
+            json,
+        } => {
+            let opts = eval_raft::EvalRaftOpts {
+                data: data.clone(),
+                lookback,
+                horizon,
+                top_m,
+                tau,
+                periods: eval_raft::parse_periods(&periods)?,
+                similarity: eval_raft::parse_similarity(&similarity)?,
+                head: eval_raft::parse_head(&head)?,
+                stride,
+                min_history,
+                with_specretf: !no_specretf,
+                metrics_out,
+            };
+            let report = eval_raft::run_eval(&opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                eval_raft::print_report(&report, &data);
             }
         }
         Commands::Serve {

@@ -264,6 +264,7 @@ dependencies = [
  "galoa-ctrader",
  "galoa-index",
  "galoa-ingest",
+ "galoa-raft",
  "serde",
  "serde_json",
  "tokio",
@@ -305,6 +306,16 @@ version = "0.1.0"
 dependencies = [
  "galoa-core",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "galoa-raft"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "galoa-core",
+ "serde",
  "thiserror",
 ]
 
