@@ -6,6 +6,14 @@ use crate::similarity::SimilarityKind;
 use galoa_core::z_normalize;
 use serde::Serialize;
 
+/// One causal RAFT query for trading-style backtests (ours, not paper PnL).
+#[derive(Clone, Debug, Serialize)]
+pub struct ForecastSignal {
+    pub end: usize,
+    pub close: f64,
+    pub pred_h: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct RaftEvalConfig {
     pub params: RaftParams,
@@ -293,6 +301,68 @@ pub fn run_raft_eval(closes: &[f64], cfg: &RaftEvalConfig) -> Result<RaftEvalRep
             acc_td.finish("td_znorm_l2"),
         ],
     })
+}
+
+/// Walk-forward RAFT end-of-horizon predicted closes (same causal protocol as eval).
+pub fn run_raft_signals(
+    closes: &[f64],
+    cfg: &RaftEvalConfig,
+) -> Result<Vec<ForecastSignal>, RaftError> {
+    let l = cfg.params.lookback;
+    let h = cfg.params.horizon;
+    let k = cfg.params.top_m;
+    if l == 0 || h == 0 || k == 0 || cfg.stride == 0 {
+        return Err(RaftError::InvalidParams);
+    }
+    let need = l + h + cfg.min_history;
+    if closes.len() < need {
+        return Err(RaftError::TooShort {
+            got: closes.len(),
+            lookback: l,
+            horizon: h,
+        });
+    }
+
+    let mut ridge = RidgeHead::new(h);
+    let mut train_x: Vec<Vec<f64>> = Vec::new();
+    let mut train_y: Vec<Vec<f64>> = Vec::new();
+    let mut query_i = 0usize;
+    let mut out = Vec::new();
+
+    let first_end = l + cfg.min_history;
+    let last_end = closes.len() - h;
+    let mut end = first_end;
+    while end <= last_end {
+        let q_last = closes[end - 1];
+        let actual: Vec<f64> = closes[end..end + h].to_vec();
+        let result = retrieve_multiperiod(closes, end, &cfg.params)?;
+
+        if cfg.head == HeadKind::Ridge
+            && query_i > 0
+            && query_i % cfg.ridge_retrain_every == 0
+            && train_x.len() >= cfg.ridge_min_train
+        {
+            ridge.fit_ridge(&train_x, &train_y, cfg.ridge_lambda);
+        }
+
+        let pred = forecast_with_head(&result, cfg.head, Some(&ridge));
+        out.push(ForecastSignal {
+            end,
+            close: q_last,
+            pred_h: pred[h - 1],
+        });
+
+        if cfg.head == HeadKind::Ridge {
+            let feat = RidgeHead::features(&result);
+            let y_off: Vec<f64> = actual.iter().map(|a| a - q_last).collect();
+            train_x.push(feat);
+            train_y.push(y_off);
+        }
+
+        query_i += 1;
+        end += cfg.stride;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

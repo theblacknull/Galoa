@@ -2,6 +2,7 @@
 //! Also: SpecReTF (`eval-specretf`) and RAFT (`eval-raft`) always-FIRE offline evals.
 
 mod api;
+mod backtest;
 mod eval_paper;
 mod eval_raft;
 mod eval_specretf;
@@ -236,6 +237,47 @@ enum Commands {
         /// Skip SpecReTF side-by-side (faster).
         #[arg(long, default_value_t = false)]
         no_specretf: bool,
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Trading-style USD equity backtest on Gold M1 (ours — not paper PnL).
+    ///
+    /// Papers report MSE/MAE on scaled original values. This command turns
+    /// SpecReTF fusion / RAFT ridge (optional paper MLP signals JSON) into a
+    /// simple CFD-like $10k equity curve with/without round-trip cost.
+    Backtest {
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
+        #[arg(long, default_value_t = 10000.0)]
+        equity: f64,
+        #[arg(long, default_value_t = DEFAULT_WINDOW)]
+        window: usize,
+        #[arg(long, default_value_t = DEFAULT_HORIZON)]
+        horizon: usize,
+        #[arg(long, default_value_t = SPECRETF_K)]
+        k: usize,
+        #[arg(long, default_value_t = SPECRETF_N_FFT)]
+        n_fft: usize,
+        #[arg(long, default_value_t = SPECRETF_HOP)]
+        hop: usize,
+        #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
+        ema_alpha: f64,
+        /// Round-trip cost in basis points of notional (default 2 bps).
+        #[arg(long, default_value_t = 2.0)]
+        cost_rt_bps: f64,
+        #[arg(long, default_value_t = DEFAULT_LOOKBACK)]
+        lookback_raft: usize,
+        #[arg(long, default_value_t = DEFAULT_TOP_M)]
+        top_m_raft: usize,
+        #[arg(long, default_value_t = DEFAULT_TAU)]
+        tau: f64,
+        #[arg(long, default_value_t = 128)]
+        min_history: usize,
+        /// Optional JSON signals from `scripts/raft_paper/dump_raft_mlp_signals.py`.
+        #[arg(long)]
+        raft_mlp_signals: Option<PathBuf>,
         #[arg(long)]
         metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -561,6 +603,48 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 eval_raft::print_report(&report, &data);
+            }
+        }
+        Commands::Backtest {
+            data,
+            equity,
+            window,
+            horizon,
+            k,
+            n_fft,
+            hop,
+            ema_alpha,
+            cost_rt_bps,
+            lookback_raft,
+            top_m_raft,
+            tau,
+            min_history,
+            raft_mlp_signals,
+            metrics_out,
+            json,
+        } => {
+            let opts = backtest::BacktestOpts {
+                data: data.clone(),
+                equity0: equity,
+                window,
+                horizon,
+                k,
+                n_fft,
+                hop,
+                ema_alpha,
+                cost_rt_bps,
+                lookback_raft,
+                top_m_raft,
+                tau,
+                min_history,
+                raft_mlp_signals,
+                metrics_out,
+            };
+            let report = backtest::run_backtest(&opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                backtest::print_report(&report);
             }
         }
         Commands::Serve {

@@ -11,7 +11,9 @@ mod retrieve;
 mod similarity;
 
 pub use downsample::{avg_pool, repeat_upsample};
-pub use eval::{run_raft_eval, MethodMetrics, RaftEvalConfig, RaftEvalReport};
+pub use eval::{
+    run_raft_eval, run_raft_signals, ForecastSignal, MethodMetrics, RaftEvalConfig, RaftEvalReport,
+};
 pub use head::{forecast_with_head, HeadKind, RidgeHead};
 pub use retrieve::{
     forecast_retrieval_only, offset_subtract, retrieve_multiperiod, retrieve_period, softmax_tau,

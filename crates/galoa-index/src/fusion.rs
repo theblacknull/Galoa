@@ -11,6 +11,15 @@
 use crate::specretf::{
     accumulate_pred, pred_means, Acc, EvalConfig, EvalReport, SpecReTfIndex, SpecReTfIndexError,
 };
+use serde::Serialize;
+
+/// One causal query: bar index `end` is the first future bar; decision close is `closes[end-1]`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ForecastSignal {
+    pub end: usize,
+    pub close: f64,
+    pub pred_h: f64,
+}
 /// Ridge / fusion hyperparams for walk-forward training.
 #[derive(Clone, Debug)]
 pub struct FusionTrainConfig {
@@ -305,6 +314,99 @@ pub fn run_specretf_fusion_eval(
             acc_fus.finish("fusion_full", false),
         ],
     })
+}
+
+/// Walk-forward SpecReTF fusion signals for trading-style backtests (ours, not paper PnL).
+///
+/// Returns end-of-horizon predicted closes for `fusion_full` (and optionally retrieval).
+pub fn run_specretf_fusion_signals(
+    closes: &[f64],
+    cfg: &EvalConfig,
+    train: &FusionTrainConfig,
+) -> Result<(Vec<ForecastSignal>, Vec<ForecastSignal>), SpecReTfIndexError> {
+    if cfg.window == 0 || cfg.horizon == 0 || cfg.k == 0 || cfg.stride == 0 {
+        return Err(SpecReTfIndexError::InvalidParams);
+    }
+    let need = cfg.window + cfg.horizon;
+    if closes.len() < need + cfg.min_history_windows {
+        return Err(SpecReTfIndexError::TooShort {
+            got: closes.len(),
+            window: cfg.window,
+            horizon: cfg.horizon,
+        });
+    }
+
+    let index = SpecReTfIndex::build_with_signal(
+        closes,
+        cfg.window,
+        cfg.horizon,
+        cfg.params.clone(),
+        cfg.signal,
+    )?;
+
+    let h = cfg.horizon;
+    let mut direct = RidgeMap::new(h, h);
+    let mut fusion = RidgeMap::identity_on_first_half(h);
+    let mut train_direct_x: Vec<Vec<f64>> = Vec::new();
+    let mut train_direct_y: Vec<Vec<f64>> = Vec::new();
+    let mut train_fusion_x: Vec<Vec<f64>> = Vec::new();
+    let mut train_fusion_y: Vec<Vec<f64>> = Vec::new();
+
+    let mut fusion_sigs = Vec::new();
+    let mut retrieval_sigs = Vec::new();
+
+    let first_end = cfg.window + cfg.min_history_windows;
+    let last_end = closes.len() - cfg.horizon;
+    let mut end = first_end;
+    let mut query_i = 0usize;
+
+    while end <= last_end {
+        let q_last = closes[end - 1];
+        let actual: Vec<f64> = closes[end..end + h].to_vec();
+        let y_off: Vec<f64> = actual.iter().map(|a| a - q_last).collect();
+
+        if query_i > 0
+            && query_i % train.ridge_retrain_every == 0
+            && train_direct_x.len() >= train.ridge_min_train
+        {
+            direct.fit_ridge(&train_direct_x, &train_direct_y, train.ridge_lambda);
+            fusion.fit_ridge(&train_fusion_x, &train_fusion_y, train.ridge_lambda);
+        }
+
+        let spec = index.forecast_at(end, cfg.k)?;
+        let y_ret_abs = pred_means(&spec.forecast);
+        let y_ret_off: Vec<f64> = y_ret_abs.iter().map(|v| v - q_last).collect();
+
+        let q_feat = query_direct_features(closes, end, cfg.window, h);
+        let y_dir_off = direct.predict(&q_feat);
+
+        let mut fus_feat = Vec::with_capacity(2 * h);
+        fus_feat.extend_from_slice(&y_ret_off);
+        fus_feat.extend_from_slice(&y_dir_off);
+        let y_fus_off = fusion.predict(&fus_feat);
+        let y_fus_abs = to_absolute(&y_fus_off, q_last);
+
+        retrieval_sigs.push(ForecastSignal {
+            end,
+            close: q_last,
+            pred_h: y_ret_abs[h - 1],
+        });
+        fusion_sigs.push(ForecastSignal {
+            end,
+            close: q_last,
+            pred_h: y_fus_abs[h - 1],
+        });
+
+        train_direct_x.push(q_feat);
+        train_direct_y.push(y_off.clone());
+        train_fusion_x.push(fus_feat);
+        train_fusion_y.push(y_off);
+
+        query_i += 1;
+        end += cfg.stride;
+    }
+
+    Ok((fusion_sigs, retrieval_sigs))
 }
 
 #[cfg(test)]

@@ -43,6 +43,11 @@ cargo run -p galoa --release -- eval-specretf-full --data data/xauusd_m1_5d.bin
 cargo run -p galoa --release -- eval-specretf --data data/xauusd_m1_5d.bin \
   --metrics-out /tmp/specretf-metrics.json --json
 
+# Trading-style $10k equity backtest (ours — papers report MSE/MAE, not USD PnL)
+bash scripts/backtest_gold_10k.sh
+# or:
+cargo run -p galoa --release -- backtest --data data/xauusd_m1_5d.bin --equity 10000 --cost-rt-bps 2
+
 # Paper-protocol retrieval-only on ETT/Exchange (no neural fusion; CSV via download script)
 bash scripts/download_paper_datasets.sh
 cargo run -p galoa --release -- eval-paper-specretf \
@@ -144,8 +149,9 @@ crates/
   galoa-raft/      # RAFT time-domain retrieval + multi-period + head
   galoa-ingest/    # GALOAP1 .bin + CSV
   galoa-ctrader/   # stub
-  galoa/           # CLI: forecast | eval-specretf | eval-raft | eval-paper-specretf | serve
+  galoa/           # CLI: forecast | eval-specretf | eval-raft | backtest | serve
 scripts/raft_paper/  # paper-faithful PyTorch port (official f/g/h + ETT/Gold)
+scripts/backtest_gold_10k.sh  # $10k CFD-style equity wrapper (illustrative)
 configs/default.toml
 data/xauusd_m1_5d.bin
 ```
