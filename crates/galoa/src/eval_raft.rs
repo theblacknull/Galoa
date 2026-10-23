@@ -5,8 +5,8 @@ use galoa_core::{SpecReTfParams, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FF
 use galoa_index::{run_specretf_eval, EvalConfig as SpecEvalConfig, SignalMode};
 use galoa_ingest::{load_series, DEFAULT_GOLD_SERIES};
 use galoa_raft::{
-    run_raft_eval, HeadKind, RaftEvalConfig, RaftEvalReport, RaftParams, SimilarityKind,
-    DEFAULT_HORIZON, DEFAULT_LOOKBACK, DEFAULT_TAU, DEFAULT_TOP_M,
+    run_raft_eval, HeadKind, RaftEvalConfig, RaftEvalReport, RaftParams, RaftSignal,
+    SimilarityKind, DEFAULT_HORIZON, DEFAULT_LOOKBACK, DEFAULT_TAU, DEFAULT_TOP_M,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ pub struct EvalRaftOpts {
     pub stride: usize,
     pub min_history: usize,
     pub with_specretf: bool,
+    pub signal: RaftSignal,
     pub metrics_out: Option<PathBuf>,
 }
 
@@ -41,6 +42,7 @@ impl Default for EvalRaftOpts {
             stride: 1,
             min_history: 128,
             with_specretf: true,
+            signal: RaftSignal::LogReturns,
             metrics_out: None,
         }
     }
@@ -72,6 +74,7 @@ pub fn run_eval(opts: &EvalRaftOpts) -> Result<CombinedReport> {
         stride: opts.stride,
         min_history: opts.min_history,
         head: opts.head,
+        signal: opts.signal,
         ..Default::default()
     };
     let raft = run_raft_eval(&closes, &cfg).context("RAFT eval")?;
@@ -83,7 +86,7 @@ pub fn run_eval(opts: &EvalRaftOpts) -> Result<CombinedReport> {
             k: opts.top_m,
             stride: opts.stride,
             min_history_windows: opts.min_history,
-            signal: SignalMode::RawClose,
+            signal: SignalMode::LogReturns,
             params: SpecReTfParams {
                 n_fft: SPECRETF_N_FFT,
                 hop: SPECRETF_HOP,

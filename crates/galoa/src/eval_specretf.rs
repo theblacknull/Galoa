@@ -38,7 +38,7 @@ impl Default for EvalOpts {
             n_fft: SPECRETF_N_FFT,
             hop: SPECRETF_HOP,
             ema_alpha: SPECRETF_EMA_ALPHA,
-            signal: SignalMode::RawClose,
+            signal: SignalMode::LogReturns,
             stride: 1,
             min_history: 128,
             fusion: false,

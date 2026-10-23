@@ -3,8 +3,8 @@
 Real-time **spectral similar-segment** price forecasting (Rust), plus a separate **RAFT** (time-domain retrieval) offline path. Primary live matching is **spectral-only** on M1 close (bid):
 
 1. **Live / gated path:** log-returns → STFT magnitude → exact kNN → selective gates → **ABSTAIN** (default) or **FIRE**
-2. **SpecReTF offline eval** (arXiv:2606.19412 §3.2–3.3): Hanning STFT 50% hop → JSD₂ amp + `cos(mean ΔΦ)` → `s=s_amp+s_phase` → EMA (no renormalize) → top-K → **softmax** futures (**always FIRE**)
-3. **RAFT offline eval** (arXiv:2505.04163): time-domain Pearson patches → top-m softmax → multi-period `{1,2,4}` → identity/ridge head (**always FIRE**). Crate: `crates/galoa-raft/` (not mixed into SpecReTF).
+2. **SpecReTF offline eval** (arXiv:2606.19412 §3.2–3.3): **log-returns** (default) → Hanning STFT 50% hop → JSD₂ amp + `cos(mean ΔΦ)` → `s=s_amp+s_phase` → EMA → top-K → **softmax** futures (**always FIRE**); `--signal raw_close` for paper-like
+3. **RAFT offline eval** (arXiv:2505.04163): **log-returns** (default) Pearson patches → top-m softmax → multi-period `{1,2,4}` → identity/ridge head; forecasts compounded back to price for metrics. Crate: `crates/galoa-raft/`
 
 Time-domain z-norm L2 appears only as an eval baseline (and inside RAFT’s own contrast table).
 
@@ -81,7 +81,7 @@ cargo run -p galoa -- serve --port 3000
 | Param | Gated `forecast` | SpecReTF `eval-specretf` | RAFT `eval-raft` |
 |-------|------------------|---------------------------|------------------|
 | `W`/`L` / `H`/`F` / `k`/`m` | 64 / 16 / 10 | 64 / 16 / **20** | 64 / 16 / 10 |
-| STFT / retrieval | `n_fft=16` `hop=4` (mag → F) | `n_fft=32` `hop=16` Hann, **raw close** | Pearson patches, τ=0.1, periods `{1,2,4}` |
+| STFT / retrieval | `n_fft=16` `hop=4` (mag → F) | `n_fft=32` `hop=16` Hann, **log_returns** | Pearson on **log_returns**, τ=0.1, `{1,2,4}` |
 | Score | L2 on L2-normalized mag | `s_amp+s_phase` + EMA | Pearson (or `--similarity euclidean`) |
 | Aggregate | gated ensemble | **softmax(`S_k`)** futures | softmax top-m values + identity/ridge |
 | Gates | `d_max` / `n_min` / `σ_max` | **none** (always FIRE) | **none** (always FIRE) |
@@ -101,20 +101,20 @@ M1 close bid → log-returns → STFT magnitude → F → kNN → gates → ABST
 **SpecReTF eval (phase 1):**
 
 ```
-M1 close bid → raw close (default) or log-returns → STFT (Hanning, B=M/2, M bins)
+M1 close bid → log-returns (default; --signal raw_close optional) → STFT (Hanning, B=M/2)
   → p=A/ΣA → JSD₂ → s_amp=1−JSD; s_phase=cos(mean ΔΦ); s=s_amp+s_phase
   → S=Σ α(1−α)^{W−w} s^w (no weight renormalize)
-  → top-K causal → level-align Y → softmax(S) aggregate + P10/P90
+  → top-K causal → level-align Y (absolute closes) → softmax(S) + P10/P90
   → metrics vs actual (MSE/MAE, direction, band)
 ```
 
 **RAFT eval (arXiv:2505.04163):**
 
 ```
-M1 close bid → sliding L patches (keys) + F futures (values)
+M1 close bid → log-returns (default) → sliding L patches + F futures
   → offset-subtract → Pearson (default) → top-m → softmax(ρ/τ)
   → multi-period avg-pool {1,2,4} → upsample/aggregate
-  → identity (retrieval+offset) or expanding ridge head
+  → identity or ridge → compound returns → absolute closes for metrics/PnL
   → always FIRE; metrics vs SpecReTF / naive / td_znorm_l2
 ```
 
@@ -136,9 +136,19 @@ python3 scripts/dump_mt5_xauusd_m1.py --days 5          # mt5linux :18812
 python scripts/dump_mt5_xauusd_m1.py --days 5 --native  # Windows MT5
 ```
 
-## Binary format (`GALOAP1`)
+## Binary formats
 
-Little-endian: magic `GALOAP1\0`, `u64` count, `i64` `ts_ns[]`, `f64` `close[]`.
+**`GALOAP1` (closes):** magic `GALOAP1\0`, `u64` count, `i64` `ts_ns[]`, `f64` `close[]`.
+
+**`GALOAR1` (log-returns, model feature):** magic `GALOAR1\0`, `u64` count `m=N−1`, ending-bar `ts_ns[]`, `f64` `r[i]=ln(c[i+1]/c[i])`.
+
+```bash
+# Historical batch backfill (LiveIngest stays off)
+cargo run -p galoa --release -- convert-logret \
+  --from data/xauusd_m1_5d.bin --to data/xauusd_m1_5d.logret.bin
+```
+
+Realtime `push_close` lives in `galoa_ingest::live` behind `LIVE_INGEST_ENABLED=false` — see `docs` store note `galoa-log-return-input.md`.
 
 ## Layout
 

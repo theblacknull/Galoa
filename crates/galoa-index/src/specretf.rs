@@ -263,8 +263,8 @@ impl Default for EvalConfig {
             horizon: DEFAULT_HORIZON,
             k: galoa_core::SPECRETF_K,
             params: SpecReTfParams::default(),
-            // Gold M1 sweep: raw close STFT beat log-returns vs naive (diagnostic only).
-            signal: SignalMode::RawClose,
+            // Primary model input: log-returns (raw_close still available via --signal).
+            signal: SignalMode::LogReturns,
             stride: 1,
             min_history_windows: 64,
         }

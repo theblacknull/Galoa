@@ -304,6 +304,7 @@ dependencies = [
 name = "galoa-ingest"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "galoa-core",
  "tempfile",
  "thiserror",

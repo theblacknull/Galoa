@@ -22,7 +22,10 @@ pub use forecast::{
 };
 pub use gates::{evaluate_gates, AbstainReason, GateConfig, MatchDecision};
 pub use resample::{resample_last_close, ResampleError};
-pub use returns::{log_returns, ReturnsError};
+pub use returns::{
+    closes_from_log_returns, closes_from_log_returns_into, log_return_step, log_returns,
+    log_returns_into, log_returns_with_policy, InvalidClosePolicy, ReturnsError,
+};
 pub use specretf::{
     frame_similarity, js_divergence, phase_cosine, spectral_descriptor, spectral_distance,
     spectral_similarity, SpecReTfError, SpecReTfParams, SpectralDescriptor, SpectralFrame,

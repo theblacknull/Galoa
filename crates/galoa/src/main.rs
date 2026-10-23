@@ -14,8 +14,11 @@ use galoa_core::{
     DEFAULT_HOP, DEFAULT_N_FFT, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_K, SPECRETF_N_FFT,
 };
 use galoa_index::{SignalMode, DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
-use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig, DEFAULT_GOLD_SERIES};
-use galoa_raft::{DEFAULT_LOOKBACK, DEFAULT_TAU, DEFAULT_TOP_M};
+use galoa_ingest::{
+    convert_close_bin_to_logret, generate_gold_series, write_csv, SyntheticConfig,
+    DEFAULT_GOLD_SERIES,
+};
+use galoa_raft::{RaftSignal, DEFAULT_LOOKBACK, DEFAULT_TAU, DEFAULT_TOP_M};
 use pipeline::ForecastOpts;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -41,6 +44,17 @@ enum Commands {
         bars: usize,
         #[arg(long, default_value_t = 42)]
         seed: u64,
+    },
+    /// Batch convert `GALOAP1` closes.bin → `GALOAR1` logret.bin (historical backfill).
+    ///
+    /// Does **not** enable live ingest. Shared math: `galoa_core::log_returns_into`.
+    ConvertLogret {
+        /// Input `GALOAP1` close series (default: Gold M1 5d).
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        from: PathBuf,
+        /// Output `GALOAR1` log-return series.
+        #[arg(long, default_value = "data/xauusd_m1_5d.logret.bin")]
+        to: PathBuf,
     },
     /// Run spectral forecast on real MT5 Gold M1 (default) or optional synthetic.
     Forecast {
@@ -133,8 +147,8 @@ enum Commands {
         hop: usize,
         #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
         ema_alpha: f64,
-        /// STFT input: `raw_close` (Gold-tuned / paper-like) or `log_returns`.
-        #[arg(long, default_value = "raw_close")]
+        /// STFT input: `log_returns` (default / primary) or `raw_close` (paper-like).
+        #[arg(long, default_value = "log_returns")]
         signal: String,
         /// Query stride (1 = every eligible bar; larger = faster).
         #[arg(long, default_value_t = 1)]
@@ -167,7 +181,7 @@ enum Commands {
         hop: usize,
         #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
         ema_alpha: f64,
-        #[arg(long, default_value = "raw_close")]
+        #[arg(long, default_value = "log_returns")]
         signal: String,
         #[arg(long, default_value_t = 1)]
         stride: usize,
@@ -237,6 +251,9 @@ enum Commands {
         /// Skip SpecReTF side-by-side (faster).
         #[arg(long, default_value_t = false)]
         no_specretf: bool,
+        /// Feature input: `log_returns` (default) or `raw_close`.
+        #[arg(long, default_value = "log_returns")]
+        signal: String,
         #[arg(long)]
         metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -387,6 +404,19 @@ async fn main() -> Result<()> {
                 events.len(),
                 out.display(),
                 seed
+            );
+        }
+        Commands::ConvertLogret { from, to } => {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let series = convert_close_bin_to_logret(&from, &to)
+                .with_context(|| format!("convert {} → {}", from.display(), to.display()))?;
+            println!(
+                "Wrote {} log-returns (GALOAR1) to {} from {} (batch; LiveIngest off)",
+                series.len(),
+                to.display(),
+                from.display()
             );
         }
         Commands::Forecast {
@@ -581,9 +611,13 @@ async fn main() -> Result<()> {
             stride,
             min_history,
             no_specretf,
+            signal,
             metrics_out,
             json,
         } => {
+            let signal = RaftSignal::parse(&signal).ok_or_else(|| {
+                anyhow::anyhow!("unknown --signal {signal} (use log_returns|raw_close)")
+            })?;
             let opts = eval_raft::EvalRaftOpts {
                 data: data.clone(),
                 lookback,
@@ -596,6 +630,7 @@ async fn main() -> Result<()> {
                 stride,
                 min_history,
                 with_specretf: !no_specretf,
+                signal,
                 metrics_out,
             };
             let report = eval_raft::run_eval(&opts)?;

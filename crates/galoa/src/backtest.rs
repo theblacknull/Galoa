@@ -336,7 +336,7 @@ pub fn run_backtest(opts: &BacktestOpts) -> Result<BacktestReport> {
         k: opts.k,
         stride: 1,
         min_history_windows: opts.min_history,
-        signal: SignalMode::RawClose,
+        signal: SignalMode::LogReturns,
         params: SpecReTfParams {
             n_fft: opts.n_fft,
             hop: opts.hop,
@@ -457,7 +457,7 @@ pub fn run_backtest(opts: &BacktestOpts) -> Result<BacktestReport> {
                 "n_fft": opts.n_fft,
                 "hop": opts.hop,
                 "ema_alpha": opts.ema_alpha,
-                "signal": "raw_close",
+                "signal": "log_returns",
                 "min_history": opts.min_history,
             },
             "raft_ridge": {

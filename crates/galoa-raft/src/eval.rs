@@ -3,7 +3,7 @@
 use crate::head::{forecast_with_head, HeadKind, RidgeHead};
 use crate::retrieve::{retrieve_multiperiod, RaftError, RaftParams};
 use crate::similarity::SimilarityKind;
-use galoa_core::z_normalize;
+use galoa_core::{closes_from_log_returns, log_returns, z_normalize};
 use serde::Serialize;
 
 /// One causal RAFT query for trading-style backtests (ours, not paper PnL).
@@ -12,6 +12,34 @@ pub struct ForecastSignal {
     pub end: usize,
     pub close: f64,
     pub pred_h: f64,
+}
+
+/// Primary feature series for RAFT retrieval (PnL metrics always use absolute closes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RaftSignal {
+    /// `ln(c[t+1]/c[t])` — default / primary model input.
+    #[default]
+    LogReturns,
+    /// Raw close prices (paper-like time-domain path).
+    RawClose,
+}
+
+impl RaftSignal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LogReturns => "log_returns",
+            Self::RawClose => "raw_close",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "log_returns" | "log-returns" | "returns" | "ret" => Some(Self::LogReturns),
+            "raw_close" | "raw-close" | "close" | "raw" | "price" => Some(Self::RawClose),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -25,6 +53,8 @@ pub struct RaftEvalConfig {
     pub ridge_lambda: f64,
     /// Min samples before first ridge fit.
     pub ridge_min_train: usize,
+    /// Feature input for retrieval (default log-returns).
+    pub signal: RaftSignal,
 }
 
 impl Default for RaftEvalConfig {
@@ -37,6 +67,7 @@ impl Default for RaftEvalConfig {
             ridge_retrain_every: 64,
             ridge_lambda: 1.0,
             ridge_min_train: 64,
+            signal: RaftSignal::LogReturns,
         }
     }
 }
@@ -209,7 +240,43 @@ fn td_znorm_forecast(
     means
 }
 
+fn pred_closes_from_retrieval(
+    closes: &[f64],
+    rets: Option<&[f64]>,
+    signal: RaftSignal,
+    end: usize,
+    h: usize,
+    cfg: &RaftEvalConfig,
+    ridge: &RidgeHead,
+) -> Result<Vec<f64>, RaftError> {
+    match signal {
+        RaftSignal::RawClose => {
+            let result = retrieve_multiperiod(closes, end, &cfg.params)?;
+            Ok(forecast_with_head(&result, cfg.head, Some(ridge)))
+        }
+        RaftSignal::LogReturns => {
+            let rets = rets.ok_or(RaftError::InvalidParams)?;
+            // Return index exclusive-end: closes[0..end) → rets[0..end-1).
+            let ret_end = end.saturating_sub(1);
+            if ret_end < cfg.params.lookback || ret_end + h > rets.len() {
+                return Err(RaftError::TooShort {
+                    got: rets.len(),
+                    lookback: cfg.params.lookback,
+                    horizon: h,
+                });
+            }
+            let result = retrieve_multiperiod(rets, ret_end, &cfg.params)?;
+            let pred_ret = forecast_with_head(&result, cfg.head, Some(ridge));
+            let q_last = closes[end - 1];
+            closes_from_log_returns(q_last, &pred_ret).map_err(|_| RaftError::InvalidParams)
+        }
+    }
+}
+
 /// Run walk-forward RAFT + naive + td_znorm baselines.
+///
+/// Loads **closes** for PnL metrics; when `signal == LogReturns`, retrieval runs on
+/// batch `log_returns(closes)` and forecasts are compounded back to price.
 pub fn run_raft_eval(closes: &[f64], cfg: &RaftEvalConfig) -> Result<RaftEvalReport, RaftError> {
     let l = cfg.params.lookback;
     let h = cfg.params.horizon;
@@ -217,7 +284,11 @@ pub fn run_raft_eval(closes: &[f64], cfg: &RaftEvalConfig) -> Result<RaftEvalRep
     if l == 0 || h == 0 || k == 0 || cfg.stride == 0 {
         return Err(RaftError::InvalidParams);
     }
-    let need = l + h + cfg.min_history;
+    // Log-returns shorten by 1 → need one extra close vs raw path.
+    let need = match cfg.signal {
+        RaftSignal::RawClose => l + h + cfg.min_history,
+        RaftSignal::LogReturns => l + h + cfg.min_history + 1,
+    };
     if closes.len() < need {
         return Err(RaftError::TooShort {
             got: closes.len(),
@@ -225,6 +296,11 @@ pub fn run_raft_eval(closes: &[f64], cfg: &RaftEvalConfig) -> Result<RaftEvalRep
             horizon: h,
         });
     }
+
+    let rets = match cfg.signal {
+        RaftSignal::LogReturns => Some(log_returns(closes).map_err(|_| RaftError::InvalidParams)?),
+        RaftSignal::RawClose => None,
+    };
 
     let mut acc_raft = Acc::default();
     let mut acc_naive = Acc::default();
@@ -235,32 +311,54 @@ pub fn run_raft_eval(closes: &[f64], cfg: &RaftEvalConfig) -> Result<RaftEvalRep
     let mut train_y: Vec<Vec<f64>> = Vec::new();
     let mut query_i = 0usize;
 
-    let first_end = l + cfg.min_history;
+    let first_end = match cfg.signal {
+        RaftSignal::RawClose => l + cfg.min_history,
+        RaftSignal::LogReturns => l + cfg.min_history + 1,
+    };
     let last_end = closes.len() - h;
     let mut end = first_end;
     while end <= last_end {
         let q_last = closes[end - 1];
         let actual: Vec<f64> = closes[end..end + h].to_vec();
 
-        let result = retrieve_multiperiod(closes, end, &cfg.params)?;
-
-        if cfg.head == HeadKind::Ridge {
-            // Fit on past (query_end, features, offset-target) collected earlier only.
-            if query_i > 0
-                && query_i % cfg.ridge_retrain_every == 0
-                && train_x.len() >= cfg.ridge_min_train
-            {
-                ridge.fit_ridge(&train_x, &train_y, cfg.ridge_lambda);
-            }
+        if cfg.head == HeadKind::Ridge
+            && query_i > 0
+            && query_i % cfg.ridge_retrain_every == 0
+            && train_x.len() >= cfg.ridge_min_train
+        {
+            ridge.fit_ridge(&train_x, &train_y, cfg.ridge_lambda);
         }
 
-        let pred = forecast_with_head(&result, cfg.head, Some(&ridge));
+        let pred = pred_closes_from_retrieval(
+            closes,
+            rets.as_deref(),
+            cfg.signal,
+            end,
+            h,
+            cfg,
+            &ridge,
+        )?;
         accumulate(&mut acc_raft, q_last, &actual, &pred);
 
-        // Store training pair for *future* ridge fits (no leakage into this pred).
         if cfg.head == HeadKind::Ridge {
-            let feat = RidgeHead::features(&result);
-            let y_off: Vec<f64> = actual.iter().map(|a| a - q_last).collect();
+            let (feat, y_off) = match cfg.signal {
+                RaftSignal::RawClose => {
+                    let result = retrieve_multiperiod(closes, end, &cfg.params)?;
+                    let y_off: Vec<f64> = actual.iter().map(|a| a - q_last).collect();
+                    (RidgeHead::features(&result), y_off)
+                }
+                RaftSignal::LogReturns => {
+                    let rets = rets.as_ref().unwrap();
+                    let ret_end = end - 1;
+                    let result = retrieve_multiperiod(rets, ret_end, &cfg.params)?;
+                    let q_last_ret = rets[ret_end - 1];
+                    let y_off: Vec<f64> = rets[ret_end..ret_end + h]
+                        .iter()
+                        .map(|a| a - q_last_ret)
+                        .collect();
+                    (RidgeHead::features(&result), y_off)
+                }
+            };
             train_x.push(feat);
             train_y.push(y_off);
         }
@@ -304,6 +402,9 @@ pub fn run_raft_eval(closes: &[f64], cfg: &RaftEvalConfig) -> Result<RaftEvalRep
 }
 
 /// Walk-forward RAFT end-of-horizon predicted closes (same causal protocol as eval).
+///
+/// Always emits absolute `close` / `pred_h` for trading metrics (compounds when
+/// `signal == LogReturns`).
 pub fn run_raft_signals(
     closes: &[f64],
     cfg: &RaftEvalConfig,
@@ -314,7 +415,10 @@ pub fn run_raft_signals(
     if l == 0 || h == 0 || k == 0 || cfg.stride == 0 {
         return Err(RaftError::InvalidParams);
     }
-    let need = l + h + cfg.min_history;
+    let need = match cfg.signal {
+        RaftSignal::RawClose => l + h + cfg.min_history,
+        RaftSignal::LogReturns => l + h + cfg.min_history + 1,
+    };
     if closes.len() < need {
         return Err(RaftError::TooShort {
             got: closes.len(),
@@ -323,19 +427,26 @@ pub fn run_raft_signals(
         });
     }
 
+    let rets = match cfg.signal {
+        RaftSignal::LogReturns => Some(log_returns(closes).map_err(|_| RaftError::InvalidParams)?),
+        RaftSignal::RawClose => None,
+    };
+
     let mut ridge = RidgeHead::new(h);
     let mut train_x: Vec<Vec<f64>> = Vec::new();
     let mut train_y: Vec<Vec<f64>> = Vec::new();
     let mut query_i = 0usize;
     let mut out = Vec::new();
 
-    let first_end = l + cfg.min_history;
+    let first_end = match cfg.signal {
+        RaftSignal::RawClose => l + cfg.min_history,
+        RaftSignal::LogReturns => l + cfg.min_history + 1,
+    };
     let last_end = closes.len() - h;
     let mut end = first_end;
     while end <= last_end {
         let q_last = closes[end - 1];
         let actual: Vec<f64> = closes[end..end + h].to_vec();
-        let result = retrieve_multiperiod(closes, end, &cfg.params)?;
 
         if cfg.head == HeadKind::Ridge
             && query_i > 0
@@ -345,7 +456,15 @@ pub fn run_raft_signals(
             ridge.fit_ridge(&train_x, &train_y, cfg.ridge_lambda);
         }
 
-        let pred = forecast_with_head(&result, cfg.head, Some(&ridge));
+        let pred = pred_closes_from_retrieval(
+            closes,
+            rets.as_deref(),
+            cfg.signal,
+            end,
+            h,
+            cfg,
+            &ridge,
+        )?;
         out.push(ForecastSignal {
             end,
             close: q_last,
@@ -353,8 +472,24 @@ pub fn run_raft_signals(
         });
 
         if cfg.head == HeadKind::Ridge {
-            let feat = RidgeHead::features(&result);
-            let y_off: Vec<f64> = actual.iter().map(|a| a - q_last).collect();
+            let (feat, y_off) = match cfg.signal {
+                RaftSignal::RawClose => {
+                    let result = retrieve_multiperiod(closes, end, &cfg.params)?;
+                    let y_off: Vec<f64> = actual.iter().map(|a| a - q_last).collect();
+                    (RidgeHead::features(&result), y_off)
+                }
+                RaftSignal::LogReturns => {
+                    let rets = rets.as_ref().unwrap();
+                    let ret_end = end - 1;
+                    let result = retrieve_multiperiod(rets, ret_end, &cfg.params)?;
+                    let q_last_ret = rets[ret_end - 1];
+                    let y_off: Vec<f64> = rets[ret_end..ret_end + h]
+                        .iter()
+                        .map(|a| a - q_last_ret)
+                        .collect();
+                    (RidgeHead::features(&result), y_off)
+                }
+            };
             train_x.push(feat);
             train_y.push(y_off);
         }
