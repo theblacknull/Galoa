@@ -9,7 +9,35 @@ use galoa_core::{
 };
 use thiserror::Error;
 
-use crate::{DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
+use crate::{DEFAULT_HORIZON, DEFAULT_WINDOW};
+
+/// What series SpecReTF STFT sees (paper uses raw values; Galoa FX often uses log-returns).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalMode {
+    /// `ln(c[t+1]/c[t])` over the W-close window (length W−1). Scale-invariant for FX.
+    #[default]
+    LogReturns,
+    /// Raw close prices of length W — closer to SpecReTF paper STFT input.
+    RawClose,
+}
+
+impl SignalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LogReturns => "log_returns",
+            Self::RawClose => "raw_close",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "log_returns" | "log-returns" | "returns" | "ret" => Some(Self::LogReturns),
+            "raw_close" | "raw-close" | "close" | "raw" | "price" => Some(Self::RawClose),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum SpecReTfIndexError {
@@ -43,6 +71,7 @@ pub struct SpecReTfIndex {
     pub window: usize,
     pub horizon: usize,
     pub params: SpecReTfParams,
+    pub signal: SignalMode,
     pub closes: Vec<f64>,
     pub entries: Vec<SpecReTfEntry>,
 }
@@ -68,6 +97,16 @@ impl SpecReTfIndex {
         horizon: usize,
         params: SpecReTfParams,
     ) -> Result<Self, SpecReTfIndexError> {
+        Self::build_with_signal(closes, window, horizon, params, SignalMode::default())
+    }
+
+    pub fn build_with_signal(
+        closes: &[f64],
+        window: usize,
+        horizon: usize,
+        params: SpecReTfParams,
+        signal: SignalMode,
+    ) -> Result<Self, SpecReTfIndexError> {
         if window == 0 || horizon == 0 {
             return Err(SpecReTfIndexError::InvalidParams);
         }
@@ -79,10 +118,15 @@ impl SpecReTfIndex {
                 horizon,
             });
         }
-        if window < params.n_fft + 1 {
+        let min_w = match signal {
+            // log-returns shorten by 1 → need W ≥ M+1
+            SignalMode::LogReturns => params.n_fft + 1,
+            SignalMode::RawClose => params.n_fft,
+        };
+        if window < min_w {
             return Err(SpecReTfIndexError::TooShort {
                 got: window,
-                window: params.n_fft + 1,
+                window: min_w,
                 horizon,
             });
         }
@@ -91,7 +135,7 @@ impl SpecReTfIndex {
         let last_start = closes.len() - need;
         for start in 0..=last_start {
             let w = &closes[start..start + window];
-            match descriptor_from_closes(w, &params) {
+            match descriptor_from_closes(w, &params, signal) {
                 Ok(descriptor) => {
                     entries.push(SpecReTfEntry {
                         end_idx: start + window,
@@ -108,6 +152,7 @@ impl SpecReTfIndex {
             window,
             horizon,
             params,
+            signal,
             closes: closes.to_vec(),
             entries,
         })
@@ -124,7 +169,7 @@ impl SpecReTfIndex {
         }
         let q_start = query_end - self.window;
         let query_window = &self.closes[q_start..query_end];
-        let q_desc = descriptor_from_closes(query_window, &self.params)?;
+        let q_desc = descriptor_from_closes(query_window, &self.params, self.signal)?;
         let q_last = self.closes[query_end - 1];
 
         let mut scored: Vec<(f64, usize)> = Vec::with_capacity(self.entries.len());
@@ -185,9 +230,15 @@ fn overlaps(entry_end: usize, window: usize, horizon: usize, query_end: usize, q
 fn descriptor_from_closes(
     closes: &[f64],
     params: &SpecReTfParams,
+    signal: SignalMode,
 ) -> Result<SpectralDescriptor, SpecReTfIndexError> {
-    let rets = log_returns(closes)?;
-    Ok(spectral_descriptor(&rets, params)?)
+    match signal {
+        SignalMode::LogReturns => {
+            let rets = log_returns(closes)?;
+            Ok(spectral_descriptor(&rets, params)?)
+        }
+        SignalMode::RawClose => Ok(spectral_descriptor(closes, params)?),
+    }
 }
 
 // ─── Offline walk-forward eval ───────────────────────────────────────────────
@@ -198,6 +249,7 @@ pub struct EvalConfig {
     pub horizon: usize,
     pub k: usize,
     pub params: SpecReTfParams,
+    pub signal: SignalMode,
     /// Subsample query stride (1 = every bar). Larger → faster smoke runs.
     pub stride: usize,
     /// Minimum library entries before first query (expanding warm-up).
@@ -209,8 +261,10 @@ impl Default for EvalConfig {
         Self {
             window: DEFAULT_WINDOW,
             horizon: DEFAULT_HORIZON,
-            k: DEFAULT_K,
+            k: galoa_core::SPECRETF_K,
             params: SpecReTfParams::default(),
+            // Gold M1 sweep: raw close STFT beat log-returns vs naive (diagnostic only).
+            signal: SignalMode::RawClose,
             stride: 1,
             min_history_windows: 64,
         }
@@ -243,7 +297,32 @@ pub struct EvalReport {
     pub n_fft: usize,
     pub hop: usize,
     pub ema_alpha: f64,
+    pub signal: SignalMode,
     pub methods: Vec<MethodMetrics>,
+}
+
+/// One hyperparameter grid cell (SpecReTF vs baselines).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SweepRow {
+    pub window: usize,
+    pub horizon: usize,
+    pub k: usize,
+    pub n_fft: usize,
+    pub hop: usize,
+    pub ema_alpha: f64,
+    pub signal: SignalMode,
+    pub stride: usize,
+    pub n_frames: usize,
+    pub specretf: MethodMetrics,
+    pub naive_last: MethodMetrics,
+    pub td_znorm_l2_knn: MethodMetrics,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SweepReport {
+    pub n_bars: usize,
+    pub protocol: String,
+    pub rows: Vec<SweepRow>,
 }
 
 #[derive(Default)]
@@ -302,7 +381,13 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
         });
     }
 
-    let index = SpecReTfIndex::build(closes, cfg.window, cfg.horizon, cfg.params.clone())?;
+    let index = SpecReTfIndex::build_with_signal(
+        closes,
+        cfg.window,
+        cfg.horizon,
+        cfg.params.clone(),
+        cfg.signal,
+    )?;
 
     // Precompute z-norm vectors for time-domain baseline (same window starts as index).
     let mut z_feats: Vec<Option<Vec<f64>>> = Vec::with_capacity(index.entries.len());
@@ -312,6 +397,32 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
         z_feats.push(z_normalize(w).ok().map(|(z, _)| z));
     }
 
+    let (acc_spec, acc_naive, acc_td) = eval_accums(closes, &index, &z_feats, cfg)?;
+
+    Ok(EvalReport {
+        n_bars: closes.len(),
+        window: cfg.window,
+        horizon: cfg.horizon,
+        k: cfg.k,
+        stride: cfg.stride,
+        n_fft: cfg.params.n_fft,
+        hop: cfg.params.hop,
+        ema_alpha: cfg.params.ema_alpha,
+        signal: cfg.signal,
+        methods: vec![
+            acc_spec.finish("specretf", true),
+            acc_naive.finish("naive_last", false),
+            acc_td.finish("td_znorm_l2_knn", false),
+        ],
+    })
+}
+
+fn eval_accums(
+    closes: &[f64],
+    index: &SpecReTfIndex,
+    z_feats: &[Option<Vec<f64>>],
+    cfg: &EvalConfig,
+) -> Result<(Acc, Acc, Acc), SpecReTfIndexError> {
     let mut acc_spec = Acc::default();
     let mut acc_naive = Acc::default();
     let mut acc_td = Acc::default();
@@ -323,7 +434,6 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
         let q_last = closes[end - 1];
         let actual: Vec<f64> = closes[end..end + cfg.horizon].to_vec();
 
-        // --- SpecReTF ---
         let spec = index.forecast_at(end, cfg.k)?;
         accumulate_pred(
             &mut acc_spec,
@@ -333,15 +443,13 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
             Some(&spec.forecast),
         );
 
-        // --- Naive: last-value / zero-return ---
         let naive_pred = vec![q_last; cfg.horizon];
         accumulate_pred(&mut acc_naive, q_last, &actual, &naive_pred, None);
 
-        // --- Time-domain z-norm L2 kNN (contrast only) ---
         let td_pred = time_domain_knn_forecast(
             closes,
-            &index,
-            &z_feats,
+            index,
+            z_feats,
             end,
             cfg.window,
             cfg.horizon,
@@ -351,21 +459,110 @@ pub fn run_specretf_eval(closes: &[f64], cfg: &EvalConfig) -> Result<EvalReport,
 
         end += cfg.stride;
     }
+    Ok((acc_spec, acc_naive, acc_td))
+}
 
-    Ok(EvalReport {
+/// Paper-like hyperparameter grid. Rebuilds SpecReTF index when `(W,M,α,signal)` change;
+/// reuses index across `K` values.
+pub fn run_specretf_sweep(
+    closes: &[f64],
+    windows: &[usize],
+    horizon: usize,
+    ks: &[usize],
+    n_ffts: &[usize],
+    alphas: &[f64],
+    signals: &[SignalMode],
+    stride: usize,
+    min_history: usize,
+) -> Result<SweepReport, SpecReTfIndexError> {
+    if windows.is_empty()
+        || ks.is_empty()
+        || n_ffts.is_empty()
+        || alphas.is_empty()
+        || signals.is_empty()
+        || horizon == 0
+        || stride == 0
+    {
+        return Err(SpecReTfIndexError::InvalidParams);
+    }
+
+    let mut rows = Vec::new();
+    for &window in windows {
+        for &signal in signals {
+            for &n_fft in n_ffts {
+                let hop = n_fft / 2;
+                if hop == 0 {
+                    continue;
+                }
+                for &ema_alpha in alphas {
+                    let params = SpecReTfParams {
+                        n_fft,
+                        hop,
+                        ema_alpha,
+                    };
+                    let index = match SpecReTfIndex::build_with_signal(
+                        closes,
+                        window,
+                        horizon,
+                        params.clone(),
+                        signal,
+                    ) {
+                        Ok(idx) => idx,
+                        Err(SpecReTfIndexError::TooShort { .. }) => continue,
+                        Err(e) => return Err(e),
+                    };
+                    let mut z_feats: Vec<Option<Vec<f64>>> =
+                        Vec::with_capacity(index.entries.len());
+                    for e in &index.entries {
+                        let start = e.end_idx - window;
+                        let w = &closes[start..e.end_idx];
+                        z_feats.push(z_normalize(w).ok().map(|(z, _)| z));
+                    }
+                    let signal_len = match signal {
+                        SignalMode::LogReturns => window.saturating_sub(1),
+                        SignalMode::RawClose => window,
+                    };
+                    let n_frames = params.num_frames(signal_len);
+
+                    for &k in ks {
+                        let cfg = EvalConfig {
+                            window,
+                            horizon,
+                            k,
+                            params: params.clone(),
+                            signal,
+                            stride,
+                            min_history_windows: min_history,
+                        };
+                        if closes.len() < window + horizon + min_history {
+                            continue;
+                        }
+                        let (acc_spec, acc_naive, acc_td) =
+                            eval_accums(closes, &index, &z_feats, &cfg)?;
+                        rows.push(SweepRow {
+                            window,
+                            horizon,
+                            k,
+                            n_fft,
+                            hop,
+                            ema_alpha,
+                            signal,
+                            stride,
+                            n_frames,
+                            specretf: acc_spec.finish("specretf", true),
+                            naive_last: acc_naive.finish("naive_last", false),
+                            td_znorm_l2_knn: acc_td.finish("td_znorm_l2_knn", false),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(SweepReport {
         n_bars: closes.len(),
-        window: cfg.window,
-        horizon: cfg.horizon,
-        k: cfg.k,
-        stride: cfg.stride,
-        n_fft: cfg.params.n_fft,
-        hop: cfg.params.hop,
-        ema_alpha: cfg.params.ema_alpha,
-        methods: vec![
-            acc_spec.finish("specretf", true),
-            acc_naive.finish("naive_last", false),
-            acc_td.finish("td_znorm_l2_knn", false),
-        ],
+        protocol: "walk_forward_expanding_causal_always_fire".into(),
+        rows,
     })
 }
 
@@ -584,6 +781,7 @@ mod tests {
             k: 5,
             stride: 4,
             min_history_windows: 20,
+            signal: SignalMode::LogReturns,
             params: SpecReTfParams {
                 n_fft: 16,
                 hop: 8,

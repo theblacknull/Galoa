@@ -1,8 +1,12 @@
 //! Offline SpecReTF walk-forward evaluation (always FIRE).
 
 use anyhow::{bail, Context, Result};
-use galoa_core::{SpecReTfParams, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FFT};
-use galoa_index::{run_specretf_eval, EvalConfig, EvalReport};
+use galoa_core::{
+    SpecReTfParams, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_K, SPECRETF_N_FFT,
+};
+use galoa_index::{
+    run_specretf_eval, run_specretf_sweep, EvalConfig, EvalReport, SignalMode, SweepReport,
+};
 use galoa_ingest::{load_series, DEFAULT_GOLD_SERIES};
 use std::path::{Path, PathBuf};
 
@@ -15,6 +19,7 @@ pub struct EvalOpts {
     pub n_fft: usize,
     pub hop: usize,
     pub ema_alpha: f64,
+    pub signal: SignalMode,
     pub stride: usize,
     pub min_history: usize,
     pub metrics_out: Option<PathBuf>,
@@ -26,10 +31,11 @@ impl Default for EvalOpts {
             data: PathBuf::from(DEFAULT_GOLD_SERIES),
             window: galoa_index::DEFAULT_WINDOW,
             horizon: galoa_index::DEFAULT_HORIZON,
-            k: galoa_index::DEFAULT_K,
+            k: SPECRETF_K,
             n_fft: SPECRETF_N_FFT,
             hop: SPECRETF_HOP,
             ema_alpha: SPECRETF_EMA_ALPHA,
+            signal: SignalMode::RawClose,
             stride: 1,
             min_history: 128,
             metrics_out: None,
@@ -49,6 +55,7 @@ pub fn run_eval(opts: &EvalOpts) -> Result<EvalReport> {
         k: opts.k,
         stride: opts.stride,
         min_history_windows: opts.min_history,
+        signal: opts.signal,
         params: SpecReTfParams {
             n_fft: opts.n_fft,
             hop: opts.hop,
@@ -67,10 +74,68 @@ pub fn run_eval(opts: &EvalOpts) -> Result<EvalReport> {
     Ok(report)
 }
 
+#[derive(Clone, Debug)]
+pub struct SweepOpts {
+    pub data: PathBuf,
+    pub windows: Vec<usize>,
+    pub horizon: usize,
+    pub ks: Vec<usize>,
+    pub n_ffts: Vec<usize>,
+    pub alphas: Vec<f64>,
+    pub signals: Vec<SignalMode>,
+    pub stride: usize,
+    pub min_history: usize,
+    pub metrics_out: Option<PathBuf>,
+}
+
+impl Default for SweepOpts {
+    fn default() -> Self {
+        Self {
+            data: PathBuf::from(DEFAULT_GOLD_SERIES),
+            windows: vec![64],
+            horizon: galoa_index::DEFAULT_HORIZON,
+            ks: vec![5, 10, 20],
+            n_ffts: vec![8, 16, 32],
+            alphas: vec![0.01, 0.05, 0.1, 0.2],
+            signals: vec![SignalMode::LogReturns, SignalMode::RawClose],
+            stride: 16,
+            min_history: 128,
+            metrics_out: None,
+        }
+    }
+}
+
+pub fn run_sweep(opts: &SweepOpts) -> Result<SweepReport> {
+    let events = load_series(&opts.data).with_context(|| format!("load {}", opts.data.display()))?;
+    if events.is_empty() {
+        bail!("empty series");
+    }
+    let closes: Vec<f64> = events.iter().map(|e| e.close).collect();
+    let report = run_specretf_sweep(
+        &closes,
+        &opts.windows,
+        opts.horizon,
+        &opts.ks,
+        &opts.n_ffts,
+        &opts.alphas,
+        &opts.signals,
+        opts.stride,
+        opts.min_history,
+    )?;
+    if let Some(ref out) = opts.metrics_out {
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&report)?;
+        std::fs::write(out, json).with_context(|| format!("write {}", out.display()))?;
+    }
+    Ok(report)
+}
+
 pub fn print_report(r: &EvalReport, data: &Path) {
     println!("Galoa SpecReTF offline eval (always FIRE)");
     println!(
-        "data={}  bars={}  W={} H={} K={}  stride={}  STFT n_fft={} hop={}  ema_α={}",
+        "data={}  bars={}  W={} H={} K={}  stride={}  STFT n_fft={} hop={}  ema_α={}  signal={}",
         data.display(),
         r.n_bars,
         r.window,
@@ -79,7 +144,8 @@ pub fn print_report(r: &EvalReport, data: &Path) {
         r.stride,
         r.n_fft,
         r.hop,
-        r.ema_alpha
+        r.ema_alpha,
+        r.signal.as_str()
     );
     println!();
     println!(
@@ -109,4 +175,49 @@ pub fn print_report(r: &EvalReport, data: &Path) {
         "Note: ~5d M1 (~{} bars) is short for strong claims; numbers are diagnostic only.",
         r.n_bars
     );
+}
+
+pub fn print_sweep(r: &SweepReport, data: &Path) {
+    println!(
+        "Galoa SpecReTF hyperparam sweep (always FIRE)  data={}  bars={}  rows={}",
+        data.display(),
+        r.n_bars,
+        r.rows.len()
+    );
+    println!(
+        "{:<11} {:>4} {:>3} {:>3} {:>5} {:>6} {:>5} {:>10} {:>10} {:>8} {:>10} {:>10}",
+        "signal", "W", "M", "K", "α", "frames", "n", "MSE_spec", "MSE_naive", "ΔMSE%", "dir_H", "MAE_spec"
+    );
+    let mut ranked: Vec<_> = r.rows.iter().collect();
+    ranked.sort_by(|a, b| {
+        a.specretf
+            .mse_close
+            .partial_cmp(&b.specretf.mse_close)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for row in ranked.iter().take(20) {
+        let delta = if row.naive_last.mse_close > 0.0 {
+            100.0 * (row.specretf.mse_close - row.naive_last.mse_close) / row.naive_last.mse_close
+        } else {
+            0.0
+        };
+        println!(
+            "{:<11} {:>4} {:>3} {:>3} {:>5.2} {:>6} {:>5} {:>10.4} {:>10.4} {:>7.1}% {:>10.4} {:>10.4}",
+            row.signal.as_str(),
+            row.window,
+            row.n_fft,
+            row.k,
+            row.ema_alpha,
+            row.n_frames,
+            row.specretf.n_queries,
+            row.specretf.mse_close,
+            row.naive_last.mse_close,
+            delta,
+            row.specretf.dir_hit_h,
+            row.specretf.mae_close
+        );
+    }
+    if ranked.len() > 20 {
+        println!("… {} more rows (sorted by SpecReTF MSE_close; top 20 shown)", ranked.len() - 20);
+    }
 }

@@ -18,11 +18,14 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use thiserror::Error;
 
 /// SpecReTF default STFT frame length `M` (Table 5 `window_size`).
-pub const SPECRETF_N_FFT: usize = 16;
+/// Tuned on Gold M1 5d: M=32 beat 8/16 for MSE vs naive (still no edge claim).
+pub const SPECRETF_N_FFT: usize = 32;
 /// 50% overlap hop `B = M/2` (impl details + Appendix G).
-pub const SPECRETF_HOP: usize = 8;
+pub const SPECRETF_HOP: usize = 16;
 /// Default recency decay α (Table 5 / Fig. 3 mid-range).
 pub const SPECRETF_EMA_ALPHA: f64 = 0.1;
+/// Default top-K for SpecReTF eval (Gold M1 sweep preferred 20 over 5/10).
+pub const SPECRETF_K: usize = 20;
 
 const EPS: f64 = 1e-12;
 const LN2: f64 = std::f64::consts::LN_2;
@@ -312,13 +315,20 @@ mod tests {
 
     #[test]
     fn frame_count_50pct_overlap_full_m_bins() {
-        let params = SpecReTfParams::default();
+        // Explicit M=16 (not SPECRETF_N_FFT default) so the arithmetic stays readable.
+        let params = SpecReTfParams {
+            n_fft: 16,
+            hop: 8,
+            ema_alpha: 0.1,
+        };
         // 63 samples, M=16 hop=8 → 1 + (63-16)/8 = 6
         assert_eq!(params.num_frames(63), 6);
         let signal = vec![0.001; 63];
         let d = spectral_descriptor(&signal, &params).unwrap();
         assert_eq!(d.frames.len(), 6);
         assert_eq!(d.frames[0].amp_dist.len(), 16); // full M, not onesided 9
+        // Default M=32 hop=16 on same length → 1 + (63-32)/16 = 2
+        assert_eq!(SpecReTfParams::default().num_frames(63), 2);
     }
 
     #[test]

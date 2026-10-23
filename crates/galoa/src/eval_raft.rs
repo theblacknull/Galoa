@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use galoa_core::{SpecReTfParams, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FFT};
-use galoa_index::{run_specretf_eval, EvalConfig as SpecEvalConfig};
+use galoa_index::{run_specretf_eval, EvalConfig as SpecEvalConfig, SignalMode};
 use galoa_ingest::{load_series, DEFAULT_GOLD_SERIES};
 use galoa_raft::{
     run_raft_eval, HeadKind, RaftEvalConfig, RaftEvalReport, RaftParams, SimilarityKind,
@@ -83,6 +83,7 @@ pub fn run_eval(opts: &EvalRaftOpts) -> Result<CombinedReport> {
             k: opts.top_m,
             stride: opts.stride,
             min_history_windows: opts.min_history,
+            signal: SignalMode::RawClose,
             params: SpecReTfParams {
                 n_fft: SPECRETF_N_FFT,
                 hop: SPECRETF_HOP,

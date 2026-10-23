@@ -14,11 +14,13 @@ k = 10
 n_fft = 16
 hop = 4
 
-# SpecReTF `eval-specretf` path (always FIRE): n_fft=16 hop=8 (~50% overlap),
-# JS(amp) + phase cosine + EMA α≈0.1. See CLI flags --n-fft --hop --ema-alpha.
-specretf_n_fft = 16
-specretf_hop = 8
+# SpecReTF `eval-specretf` path (always FIRE). Gold M1 5d sweep defaults:
+# raw_close STFT, M=32 hop=16, K=20, α=0.1 (still loses to naive — no edge claim).
+specretf_n_fft = 32
+specretf_hop = 16
+specretf_k = 20
 specretf_ema_alpha = 0.1
+specretf_signal = "raw_close"
 
 # Selective FIRE gates for gated path only (abstain by default). Eval path ignores these.
 d_max = 0.48

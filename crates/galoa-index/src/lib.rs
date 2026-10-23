@@ -13,8 +13,9 @@ pub use paper_eval::{
     PaperHorizonReport, PaperMethodMetrics,
 };
 pub use specretf::{
-    run_specretf_eval, EvalConfig, EvalReport, MethodMetrics, SpecForecastResult, SpecNeighbor,
-    SpecReTfEntry, SpecReTfIndex, SpecReTfIndexError,
+    run_specretf_eval, run_specretf_sweep, EvalConfig, EvalReport, MethodMetrics, SignalMode,
+    SpecForecastResult, SpecNeighbor, SpecReTfEntry, SpecReTfIndex, SpecReTfIndexError, SweepReport,
+    SweepRow,
 };
 
 use galoa_core::{

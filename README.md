@@ -62,13 +62,14 @@ cargo run -p galoa -- serve --port 3000
 
 | Param | Gated `forecast` | SpecReTF `eval-specretf` | RAFT `eval-raft` |
 |-------|------------------|---------------------------|------------------|
-| `W`/`L` / `H`/`F` / `k`/`m` | 64 / 16 / 10 | 64 / 16 / 10 | 64 / 16 / 10 |
-| STFT / retrieval | `n_fft=16` `hop=4` (mag → F) | `n_fft=16` `hop=8` Hann | Pearson patches, τ=0.1, periods `{1,2,4}` |
+| `W`/`L` / `H`/`F` / `k`/`m` | 64 / 16 / 10 | 64 / 16 / **20** | 64 / 16 / 10 |
+| STFT / retrieval | `n_fft=16` `hop=4` (mag → F) | `n_fft=32` `hop=16` Hann, **raw close** | Pearson patches, τ=0.1, periods `{1,2,4}` |
 | Score | L2 on L2-normalized mag | `s_amp+s_phase` + EMA | Pearson (or `--similarity euclidean`) |
 | Aggregate | gated ensemble | **softmax(`S_k`)** futures | softmax top-m values + identity/ridge |
 | Gates | `d_max` / `n_min` / `σ_max` | **none** (always FIRE) | **none** (always FIRE) |
 
-Override SpecReTF: `--window --horizon --k --n-fft --hop` (+ `--ema-alpha --stride`).  
+Override SpecReTF: `--window --horizon --k --n-fft --hop --signal --ema-alpha --stride`.  
+Sweep: `eval-specretf-sweep` (Gold 5d still trails naive — diagnostic only).  
 Override RAFT: `--lookback --horizon --top-m --tau --periods --similarity --head --stride`.
 
 ## Pipelines
@@ -82,7 +83,7 @@ M1 close bid → log-returns → STFT magnitude → F → kNN → gates → ABST
 **SpecReTF eval (phase 1):**
 
 ```
-M1 close bid → log-returns → STFT (Hanning, B=M/2, M bins)
+M1 close bid → raw close (default) or log-returns → STFT (Hanning, B=M/2, M bins)
   → p=A/ΣA → JSD₂ → s_amp=1−JSD; s_phase=cos(mean ΔΦ); s=s_amp+s_phase
   → S=Σ α(1−α)^{W−w} s^w (no weight renormalize)
   → top-K causal → level-align Y → softmax(S) aggregate + P10/P90

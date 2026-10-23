@@ -10,9 +10,9 @@ mod pipeline;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use galoa_core::{
-    DEFAULT_HOP, DEFAULT_N_FFT, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FFT,
+    DEFAULT_HOP, DEFAULT_N_FFT, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_K, SPECRETF_N_FFT,
 };
-use galoa_index::{DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
+use galoa_index::{SignalMode, DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
 use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig, DEFAULT_GOLD_SERIES};
 use galoa_raft::{DEFAULT_LOOKBACK, DEFAULT_TAU, DEFAULT_TOP_M};
 use pipeline::ForecastOpts;
@@ -122,15 +122,19 @@ enum Commands {
         window: usize,
         #[arg(long, default_value_t = DEFAULT_HORIZON)]
         horizon: usize,
-        #[arg(long, default_value_t = DEFAULT_K)]
+        /// Top-K; Gold M1 sweep preferred 20 (gated `forecast` still defaults to 10).
+        #[arg(long, default_value_t = SPECRETF_K)]
         k: usize,
         #[arg(long, default_value_t = SPECRETF_N_FFT)]
         n_fft: usize,
-        /// Hop; default 8 = 50% overlap for n_fft=16 (SpecReTF-like).
+        /// Hop; default M/2 = 16 for n_fft=32 (SpecReTF 50% overlap).
         #[arg(long, default_value_t = SPECRETF_HOP)]
         hop: usize,
         #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
         ema_alpha: f64,
+        /// STFT input: `raw_close` (Gold-tuned / paper-like) or `log_returns`.
+        #[arg(long, default_value = "raw_close")]
+        signal: String,
         /// Query stride (1 = every eligible bar; larger = faster).
         #[arg(long, default_value_t = 1)]
         stride: usize,
@@ -138,6 +142,32 @@ enum Commands {
         #[arg(long, default_value_t = 128)]
         min_history: usize,
         /// Write machine-readable metrics JSON (optional).
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Paper-like SpecReTF hyperparam sweep on Gold M1 (always FIRE).
+    EvalSpecretfSweep {
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
+        /// Comma-separated lookbacks (default 64; try 128,256,720 if series allows).
+        #[arg(long, default_value = "64")]
+        windows: String,
+        #[arg(long, default_value_t = DEFAULT_HORIZON)]
+        horizon: usize,
+        #[arg(long, default_value = "5,10,20")]
+        ks: String,
+        #[arg(long, default_value = "8,16,32")]
+        n_ffts: String,
+        #[arg(long, default_value = "0.01,0.05,0.1,0.2")]
+        alphas: String,
+        #[arg(long, default_value = "log_returns,raw_close")]
+        signals: String,
+        #[arg(long, default_value_t = 16)]
+        stride: usize,
+        #[arg(long, default_value_t = 128)]
+        min_history: usize,
         #[arg(long)]
         metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -232,6 +262,33 @@ fn opts_from(
         n_min,
         sigma_max,
     }
+}
+
+fn parse_usizes(s: &str) -> Result<Vec<usize>> {
+    s.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<usize>().map_err(|e| anyhow::anyhow!("bad usize `{p}`: {e}")))
+        .collect()
+}
+
+fn parse_f64s(s: &str) -> Result<Vec<f64>> {
+    s.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<f64>().map_err(|e| anyhow::anyhow!("bad f64 `{p}`: {e}")))
+        .collect()
+}
+
+fn parse_signals(s: &str) -> Result<Vec<SignalMode>> {
+    s.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            SignalMode::parse(p)
+                .ok_or_else(|| anyhow::anyhow!("unknown signal `{p}` (use log_returns|raw_close)"))
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -341,11 +398,14 @@ async fn main() -> Result<()> {
             n_fft,
             hop,
             ema_alpha,
+            signal,
             stride,
             min_history,
             metrics_out,
             json,
         } => {
+            let signal = SignalMode::parse(&signal)
+                .ok_or_else(|| anyhow::anyhow!("unknown --signal {signal} (use log_returns|raw_close)"))?;
             let opts = eval_specretf::EvalOpts {
                 data: data.clone(),
                 window,
@@ -354,6 +414,7 @@ async fn main() -> Result<()> {
                 n_fft,
                 hop,
                 ema_alpha,
+                signal,
                 stride,
                 min_history,
                 metrics_out,
@@ -363,6 +424,38 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 eval_specretf::print_report(&report, &data);
+            }
+        }
+        Commands::EvalSpecretfSweep {
+            data,
+            windows,
+            horizon,
+            ks,
+            n_ffts,
+            alphas,
+            signals,
+            stride,
+            min_history,
+            metrics_out,
+            json,
+        } => {
+            let opts = eval_specretf::SweepOpts {
+                data: data.clone(),
+                windows: parse_usizes(&windows)?,
+                horizon,
+                ks: parse_usizes(&ks)?,
+                n_ffts: parse_usizes(&n_ffts)?,
+                alphas: parse_f64s(&alphas)?,
+                signals: parse_signals(&signals)?,
+                stride,
+                min_history,
+                metrics_out,
+            };
+            let report = eval_specretf::run_sweep(&opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                eval_specretf::print_sweep(&report, &data);
             }
         }
         Commands::EvalRaft {
