@@ -1,6 +1,16 @@
 //! Spectral window index: STFT features + exact kNN + selective FIRE gates.
 //!
-//! Time-domain z-norm L2 matching has been removed from this path.
+//! Also: SpecReTF-style retrieval (JS amp + phase + EMA) for phase-1 offline eval
+//! (`specretf` module — always FIRE).
+//!
+//! Time-domain z-norm L2 matching is not a product path (eval baseline only).
+
+mod specretf;
+
+pub use specretf::{
+    run_specretf_eval, EvalConfig, EvalReport, MethodMetrics, SpecForecastResult, SpecNeighbor,
+    SpecReTfEntry, SpecReTfIndex, SpecReTfIndexError,
+};
 
 use galoa_core::{
     ensemble_forecast, evaluate_gates, log_returns, stft_magnitude_features, AbstainReason,

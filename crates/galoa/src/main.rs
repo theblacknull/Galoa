@@ -1,11 +1,15 @@
 //! Galoa offline MVP: Gold (XAUUSD) M1 bid-close → spectral STFT match → gated forecast.
+//! Also: SpecReTF-style always-FIRE offline eval (`eval-specretf`).
 
 mod api;
+mod eval_specretf;
 mod pipeline;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use galoa_core::{DEFAULT_HOP, DEFAULT_N_FFT};
+use galoa_core::{
+    DEFAULT_HOP, DEFAULT_N_FFT, SPECRETF_EMA_ALPHA, SPECRETF_HOP, SPECRETF_N_FFT,
+};
 use galoa_index::{DEFAULT_HORIZON, DEFAULT_K, DEFAULT_WINDOW};
 use galoa_ingest::{generate_gold_series, write_csv, SyntheticConfig, DEFAULT_GOLD_SERIES};
 use pipeline::ForecastOpts;
@@ -70,6 +74,38 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         scan: bool,
         /// Pretty-print JSON to stdout
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// SpecReTF-style walk-forward eval on Gold M1 (always FIRE; no abstain).
+    ///
+    /// Compares SpecReTF retrieval aggregate vs naive last-value and time-domain
+    /// z-norm L2 kNN (baseline contrast only).
+    EvalSpecretf {
+        #[arg(long, default_value = DEFAULT_GOLD_SERIES)]
+        data: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_WINDOW)]
+        window: usize,
+        #[arg(long, default_value_t = DEFAULT_HORIZON)]
+        horizon: usize,
+        #[arg(long, default_value_t = DEFAULT_K)]
+        k: usize,
+        #[arg(long, default_value_t = SPECRETF_N_FFT)]
+        n_fft: usize,
+        /// Hop; default 8 = 50% overlap for n_fft=16 (SpecReTF-like).
+        #[arg(long, default_value_t = SPECRETF_HOP)]
+        hop: usize,
+        #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
+        ema_alpha: f64,
+        /// Query stride (1 = every eligible bar; larger = faster).
+        #[arg(long, default_value_t = 1)]
+        stride: usize,
+        /// Min prior library windows before first query.
+        #[arg(long, default_value_t = 128)]
+        min_history: usize,
+        /// Write machine-readable metrics JSON (optional).
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -184,6 +220,38 @@ async fn main() -> Result<()> {
                 } else {
                     pipeline::print_human(&result);
                 }
+            }
+        }
+        Commands::EvalSpecretf {
+            data,
+            window,
+            horizon,
+            k,
+            n_fft,
+            hop,
+            ema_alpha,
+            stride,
+            min_history,
+            metrics_out,
+            json,
+        } => {
+            let opts = eval_specretf::EvalOpts {
+                data: data.clone(),
+                window,
+                horizon,
+                k,
+                n_fft,
+                hop,
+                ema_alpha,
+                stride,
+                min_history,
+                metrics_out,
+            };
+            let report = eval_specretf::run_eval(&opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                eval_specretf::print_report(&report, &data);
             }
         }
         Commands::Serve {

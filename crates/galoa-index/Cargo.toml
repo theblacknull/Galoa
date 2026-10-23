@@ -7,6 +7,7 @@ description = "In-memory window index and exact kNN for Galoa MVP"
 
 [dependencies]
 galoa-core = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -18,6 +18,24 @@ pub struct Forecast {
     pub points: Vec<ForecastPoint>,
 }
 
+/// One step with optional similarity-weighted mean (SpecReTF aggregate).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeightedForecastPoint {
+    pub step: usize,
+    /// Similarity-weighted mean of neighbour closes (level-aligned).
+    pub mean: f64,
+    pub median: f64,
+    pub p10: f64,
+    pub p90: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeightedForecast {
+    pub horizon: usize,
+    pub k_used: usize,
+    pub points: Vec<WeightedForecastPoint>,
+}
+
 /// Build median / P10 / P90 bands from `k` analogue trajectories of length `H`
 /// in **price space** (already denormalized to the query window scale).
 ///
@@ -44,6 +62,54 @@ pub fn ensemble_forecast(trajectories: &[Vec<f64>]) -> Forecast {
         });
     }
     Forecast {
+        horizon,
+        k_used,
+        points,
+    }
+}
+
+/// Weighted mean + median/P10/P90 from neighbour trajectories.
+///
+/// `weights` align with `trajectories` rows (e.g. SpecReTF similarities). Non-positive
+/// weights are clamped to a tiny epsilon so every neighbour still contributes.
+pub fn weighted_ensemble_forecast(trajectories: &[Vec<f64>], weights: &[f64]) -> WeightedForecast {
+    let k_used = trajectories.len().min(weights.len());
+    if k_used == 0 {
+        return WeightedForecast {
+            horizon: 0,
+            k_used: 0,
+            points: vec![],
+        };
+    }
+    let horizon = trajectories[..k_used]
+        .iter()
+        .map(|t| t.len())
+        .min()
+        .unwrap_or(0);
+    let wsum: f64 = weights[..k_used].iter().map(|w| w.max(1e-12)).sum();
+    let mut points = Vec::with_capacity(horizon);
+    for step in 0..horizon {
+        let mut vals: Vec<f64> = trajectories[..k_used].iter().map(|t| t[step]).collect();
+        let mean = if wsum > 0.0 {
+            trajectories[..k_used]
+                .iter()
+                .zip(weights[..k_used].iter())
+                .map(|(t, w)| t[step] * w.max(1e-12))
+                .sum::<f64>()
+                / wsum
+        } else {
+            vals.iter().sum::<f64>() / vals.len() as f64
+        };
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        points.push(WeightedForecastPoint {
+            step: step + 1,
+            mean,
+            median: percentile_sorted(&vals, 0.50),
+            p10: percentile_sorted(&vals, 0.10),
+            p90: percentile_sorted(&vals, 0.90),
+        });
+    }
+    WeightedForecast {
         horizon,
         k_used,
         points,

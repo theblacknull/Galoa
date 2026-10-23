@@ -1,5 +1,5 @@
 # Galoa offline MVP defaults — no secrets.
-# Matching path: spectral STFT only (no time-domain z-norm L2).
+# Matching path: spectral only (no time-domain z-norm L2 as product path).
 symbol = "XAUUSD"
 # Canonical offline series (MT5 M1 bid bar close, ~5 calendar days).
 data = "data/xauusd_m1_5d.bin"
@@ -9,12 +9,18 @@ window = 64
 horizon = 16
 k = 10
 
-# STFT on log-returns of the W-close window (Hann, onesided mag → F, L2-normed).
-# W=64 closes → 63 returns; n_fft=16 hop=4 → 12 frames × 9 bins = 108-D features.
+# Gated `forecast` path: STFT mag → F (L2-normed). W=64 → 63 returns;
+# n_fft=16 hop=4 → 12 frames × 9 bins = 108-D features.
 n_fft = 16
 hop = 4
 
-# Selective FIRE gates (abstain by default).
+# SpecReTF `eval-specretf` path (always FIRE): n_fft=16 hop=8 (~50% overlap),
+# JS(amp) + phase cosine + EMA α≈0.1. See CLI flags --n-fft --hop --ema-alpha.
+specretf_n_fft = 16
+specretf_hop = 8
+specretf_ema_alpha = 0.1
+
+# Selective FIRE gates for gated path only (abstain by default). Eval path ignores these.
 d_max = 0.48
 n_min = 3
 sigma_max = 0.0025
