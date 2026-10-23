@@ -1,0 +1,10 @@
+[package]
+name = "galoa-ctrader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "cTrader Open API ingest stub (live connect deferred)"
+
+[dependencies]
+galoa-core = { workspace = true }
+thiserror = { workspace = true }

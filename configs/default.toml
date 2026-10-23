@@ -1,0 +1,9 @@
+# Galoa offline MVP defaults — no secrets.
+symbol = "XAUUSD"
+# Resample last-close Δt in seconds; 0 = use series as-is.
+dt_secs = 0
+window = 64
+horizon = 16
+k = 10
+# Spot quote policy when live cTrader lands: mid | bid | ask
+quote_field = "mid"

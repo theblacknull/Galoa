@@ -1,0 +1,13 @@
+[package]
+name = "galoa-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CSV / synthetic Gold replay ingest for Galoa MVP"
+
+[dependencies]
+galoa-core = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

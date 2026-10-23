@@ -1,0 +1,13 @@
+[package]
+name = "galoa-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types, resampling, z-normalization, and forecast ensemble for Galoa"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = "0.5"
