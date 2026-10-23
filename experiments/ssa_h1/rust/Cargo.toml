@@ -1,0 +1,22 @@
+﻿# Standalone package (not part of MIT Galoa workspace); depends on vendored GPL-3.0 ssa_rs.
+[workspace]
+
+[package]
+name = "galoa-ssa-h1"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "ssa_h1"
+path = "src/main.rs"
+
+[dependencies]
+ssa_rs = { path = "../../../ssa/rust" }
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
