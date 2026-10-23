@@ -1,5 +1,5 @@
-﻿# Standalone package (not part of MIT Galoa workspace); depends on GPL-3.0 ssa_rs.
-# Path: Desktop/ssa/rust — keep out of Galoa [workspace] members.
+﻿# Standalone package (not part of MIT Galoa workspace); depends on vendored GPL-3.0 ssa_rs.
+# Path: Galoa/ssa/rust — keep out of Galoa [workspace] members.
 [workspace]
 
 [package]
@@ -13,7 +13,7 @@ name = "ssa_h1"
 path = "src/main.rs"
 
 [dependencies]
-ssa_rs = { path = "../../../../ssa/rust" }
+ssa_rs = { path = "../../../ssa/rust" }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
