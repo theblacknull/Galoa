@@ -34,7 +34,9 @@ pub const DEFAULT_TOP_M: usize = 10;
 pub const DEFAULT_PERIODS: [usize; 3] = [1, 2, 4];
 /// Short Gold M1 defaults (aligned with SpecReTF W/H; paper L∈{96..720} too long for 5d).
 pub const DEFAULT_LOOKBACK: usize = 64;
-pub const DEFAULT_HORIZON: usize = 16;
+/// Product default: next-bar only (`F=1`). Shares Galoa's SpecReTF horizon choice;
+/// paper RAFT often uses long `F` (e.g. 96). Futures / value patches are length 1.
+pub const DEFAULT_HORIZON: usize = 1;
 
 #[derive(Clone, Debug)]
 pub struct RaftParams {

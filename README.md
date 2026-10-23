@@ -80,11 +80,13 @@ cargo run -p galoa -- serve --port 3000
 
 | Param | Gated `forecast` | SpecReTF `eval-specretf` | RAFT `eval-raft` |
 |-------|------------------|---------------------------|------------------|
-| `W`/`L` / `H`/`F` / `k`/`m` | 64 / 16 / 10 | 64 / 16 / **20** | 64 / 16 / 10 |
-| STFT / retrieval | `n_fft=16` `hop=4` (mag → F) | `n_fft=32` `hop=16` Hann, **log_returns** | Pearson on **log_returns**, τ=0.1, `{1,2,4}` |
+| `W`/`L` / `H`/`F` / `k`/`m` | 64 / **1** / 10 | 64 / **1** / **20** | 64 / **1** / 10 |
+| STFT / retrieval | `n_fft=16` `hop=4` (mag → F) | `n_fft=8` `hop=4` Hann, **log_returns** | Pearson on **log_returns**, τ=0.1, `{1,2,4}` |
 | Score | L2 on L2-normalized mag | `s_amp+s_phase` + EMA | Pearson (or `--similarity euclidean`) |
-| Aggregate | gated ensemble | **softmax(`S_k`)** futures | softmax top-m values + identity/ridge |
+| Aggregate | gated ensemble | **softmax(`S_k`)** futures (`Y_k` len **1**) | softmax top-m values + identity/ridge |
 | Gates | `d_max` / `n_min` / `σ_max` | **none** (always FIRE) | **none** (always FIRE) |
+
+Product horizon is **next-bar only** (`H=1`); papers often use long multi-step `H`. Override with `--horizon` for paper-style trajectories.
 
 Override SpecReTF: `--window --horizon --k --n-fft --hop --signal --ema-alpha --stride`.  
 Sweep: `eval-specretf-sweep` (Gold 5d still trails naive — diagnostic only).  

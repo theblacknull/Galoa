@@ -18,10 +18,10 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use thiserror::Error;
 
 /// SpecReTF default STFT frame length `M` (Table 5 `window_size`).
-/// Tuned on Gold M1 5d: M=32 beat 8/16 for MSE vs naive (still no edge claim).
-pub const SPECRETF_N_FFT: usize = 32;
+/// Best log-returns cell on Gold M1 5d: M=8 (still no edge claim vs naive).
+pub const SPECRETF_N_FFT: usize = 8;
 /// 50% overlap hop `B = M/2` (impl details + Appendix G).
-pub const SPECRETF_HOP: usize = 16;
+pub const SPECRETF_HOP: usize = 4;
 /// Default recency decay α (Table 5 / Fig. 3 mid-range).
 pub const SPECRETF_EMA_ALPHA: f64 = 0.1;
 /// Default top-K for SpecReTF eval (Gold M1 sweep preferred 20 over 5/10).
@@ -327,8 +327,8 @@ mod tests {
         let d = spectral_descriptor(&signal, &params).unwrap();
         assert_eq!(d.frames.len(), 6);
         assert_eq!(d.frames[0].amp_dist.len(), 16); // full M, not onesided 9
-        // Default M=32 hop=16 on same length → 1 + (63-32)/16 = 2
-        assert_eq!(SpecReTfParams::default().num_frames(63), 2);
+        // Default M=8 hop=4 on same length → 1 + (63-8)/4 = 14
+        assert_eq!(SpecReTfParams::default().num_frames(63), 14);
     }
 
     #[test]

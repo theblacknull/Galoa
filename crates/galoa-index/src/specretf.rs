@@ -59,7 +59,8 @@ pub enum SpecReTfIndexError {
 pub struct SpecReTfEntry {
     pub end_idx: usize,
     pub descriptor: SpectralDescriptor,
-    /// Absolute next-H closes after the window.
+    /// Absolute next-H closes after the window (`Y_k`). Product default `H=1` ⇒
+    /// length 1 (next close only); papers often store long multi-step trajectories.
     pub future_abs: Vec<f64>,
     /// Last close of the window (for level-align).
     pub last_close: f64,
@@ -260,6 +261,7 @@ impl Default for EvalConfig {
     fn default() -> Self {
         Self {
             window: DEFAULT_WINDOW,
+            // Next-bar only; `Y_k` / forecasts are length `horizon` (=1).
             horizon: DEFAULT_HORIZON,
             k: galoa_core::SPECRETF_K,
             params: SpecReTfParams::default(),

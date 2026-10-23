@@ -30,7 +30,9 @@ use galoa_core::{
 use thiserror::Error;
 
 pub const DEFAULT_WINDOW: usize = 64;
-pub const DEFAULT_HORIZON: usize = 16;
+/// Product default: next-bar only (`H=1`). Papers often use long multi-step `H`;
+/// Galoa forecasts a single next close / log-return, so futures `Y_k` are length 1.
+pub const DEFAULT_HORIZON: usize = 1;
 pub const DEFAULT_K: usize = 10;
 
 #[derive(Debug, Error)]
@@ -58,7 +60,7 @@ pub struct IndexedWindow {
     pub end_idx: usize,
     /// L2-normalized STFT magnitude feature vector.
     pub features: Vec<f64>,
-    /// Absolute price trajectory for the H bars after the window.
+    /// Absolute next-H closes after the window. Product default `H=1` ⇒ length 1.
     pub future_abs: Vec<f64>,
 }
 

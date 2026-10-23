@@ -6,7 +6,8 @@ data = "data/xauusd_m1_5d.bin"
 # Resample last-close Δt in seconds; 0 = use series as-is.
 dt_secs = 0
 window = 64
-horizon = 16
+# Product: next-bar only (papers often use long H). Futures Y_k length = 1.
+horizon = 1
 k = 10
 
 # Gated `forecast` path: STFT mag → F (L2-normed). W=64 → 63 returns;
@@ -14,14 +15,14 @@ k = 10
 n_fft = 16
 hop = 4
 
-# SpecReTF `eval-specretf` path (always FIRE). Gold M1 5d sweep defaults.
+# SpecReTF `eval-specretf` path (always FIRE). Best log_returns Gold M1 5d cell.
 # Full-ish eq.11: `eval-specretf --fusion` / `eval-specretf-full` (direct+fusion ridge).
-# raw_close STFT, M=32 hop=16, K=20, α=0.1 (still loses to naive — no edge claim).
-specretf_n_fft = 32
-specretf_hop = 16
+# W=64 H=1 M=8 hop=4 K=20 α=0.1 signal=log_returns (still loses to naive — no edge claim).
+specretf_n_fft = 8
+specretf_hop = 4
 specretf_k = 20
 specretf_ema_alpha = 0.1
-specretf_signal = "raw_close"
+specretf_signal = "log_returns"
 
 # Selective FIRE gates for gated path only (abstain by default). Eval path ignores these.
 d_max = 0.48

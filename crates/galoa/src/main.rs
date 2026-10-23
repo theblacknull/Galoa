@@ -142,7 +142,7 @@ enum Commands {
         k: usize,
         #[arg(long, default_value_t = SPECRETF_N_FFT)]
         n_fft: usize,
-        /// Hop; default M/2 = 16 for n_fft=32 (SpecReTF 50% overlap).
+        /// Hop; default M/2 = 4 for n_fft=8 (SpecReTF 50% overlap).
         #[arg(long, default_value_t = SPECRETF_HOP)]
         hop: usize,
         #[arg(long, default_value_t = SPECRETF_EMA_ALPHA)]
