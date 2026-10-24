@@ -1,0 +1,13 @@
+﻿.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+*.pem
+*.pyc
+__pycache__/
+ssa/**/target/
+experiments/ssa_h1/rust/target/
+# debug dumps (canonical is data/*.bin)
+data/*.csv
