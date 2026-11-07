@@ -1,0 +1,15 @@
+[package]
+name = "galoa-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-memory window index and exact kNN for Galoa MVP"
+
+[dependencies]
+galoa-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+approx = "0.5"

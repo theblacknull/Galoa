@@ -1,0 +1,28 @@
+{
+  "etth1_L720_F96_mse": 0.3698543906211853,
+  "paper_etth1_F96_mse": 0.367,
+  "fidelity_pct": 99.2222368879604,
+  "gold_L96_F16": {
+    "raft_mlp_mse": 0.03880838304758072,
+    "raft_mlp_mae": 0.13231107592582703,
+    "raft_identity_mse": 0.04582472890615463,
+    "raft_identity_mae": 0.14950022101402283,
+    "naive_last_mse": 0.03877954185009003,
+    "naive_last_mae": 0.13182303309440613
+  },
+  "verdict": {
+    "approach_paper_on_ett": true,
+    "etth1_L720_fidelity_pct": 99.2222368879604,
+    "etth1_L720_ours_mse": 0.3698543906211853,
+    "etth1_L720_paper_mse": 0.367,
+    "mlp_helps_on_ett_vs_identity_naive": true,
+    "mlp_helps_on_gold_vs_naive": false,
+    "gold_L96_mlp_vs_naive_scaled_delta": 2.884119749069214e-05,
+    "why_paper_high_gold_low": [
+      "ETT/Electricity-like benchmarks vs FX Gold M1 microstructure",
+      "Paper L=96..720 + StandardScaler multivariate; Gold 5d ~6k bars forces adapted L and is non-stationary",
+      "Paper trains linear f/g/h; prior Galoa MVP used identity/ridge walk-forward",
+      "Paper metric is scaled MSE (always-FIRE); trading needs direction/edge under gates"
+    ]
+  }
+}

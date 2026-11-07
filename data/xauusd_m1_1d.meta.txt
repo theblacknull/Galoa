@@ -1,0 +1,10 @@
+symbol=XAUUSD
+timeframe=M1
+close_convention=mt5_bar_close_bid
+bars=1378
+ts_start_utc=2026-10-22T12:29:00Z
+ts_end_utc=2026-10-23T12:29:00Z
+server=ICMarketsSC-MT5-6
+source=IC_Markets_MT5_demo_via_mt5linux
+canonical=data/xauusd_m1_1d.bin
+debug_csv=data/xauusd_m1_1d.csv
