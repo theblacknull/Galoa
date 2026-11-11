@@ -1,0 +1,47 @@
+{
+  "architecture": "fit -> cumsum contribution signal group -> L/K forecast H steps; score=sum of H forecasted log-returns; PnL hold close[i+1]->close[i+1+H]",
+  "best": {
+    "dir_acc": 0.48955223880597015,
+    "elapsed_sec": 0.2830562,
+    "energy_pct": 80.0,
+    "error": null,
+    "forecast": "L",
+    "horizon": 5,
+    "l": 16,
+    "max_dd_pct": 9.301964645206425,
+    "mean_n_comp": 9.97592039800995,
+    "n": 5025,
+    "pnl_over_maxdd": -0.8959287691011489,
+    "pnl_pct": -8.333897734802198,
+    "win": 64
+  },
+  "data": "data/xauusd_m1_prior15d.bin",
+  "horizons": [
+    5
+  ],
+  "locked_config": true,
+  "metrics_only": [
+    "dir_acc",
+    "pnl_pct",
+    "pnl_over_maxdd"
+  ],
+  "rows": [
+    {
+      "dir_acc": 0.48955223880597015,
+      "elapsed_sec": 0.2830562,
+      "energy_pct": 80.0,
+      "error": null,
+      "forecast": "L",
+      "horizon": 5,
+      "l": 16,
+      "max_dd_pct": 9.301964645206425,
+      "mean_n_comp": 9.97592039800995,
+      "n": 5025,
+      "pnl_over_maxdd": -0.8959287691011489,
+      "pnl_pct": -8.333897734802198,
+      "win": 64
+    }
+  ],
+  "runtime": "rust+ssa_rs",
+  "wall_sec": 0.2842879
+}
